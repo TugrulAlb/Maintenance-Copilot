@@ -76,6 +76,7 @@ def generate_answer(state: dict[str, object]) -> dict[str, object]:
                 "content": (
                     "You are an assistant for industrial maintenance analytics. "
                     "Answer using the provided evidence and include citations from the citations array. "
+                    "If evaluator feedback is present, fix those specific gaps while staying grounded in evidence. "
                     "Return JSON with keys answer and citations."
                 ),
             },
@@ -85,6 +86,14 @@ def generate_answer(state: dict[str, object]) -> dict[str, object]:
                     {
                         "question": state.get("question"),
                         "query_type": state.get("query_type"),
+                        "router_confidence": state.get("router_confidence"),
+                        "router_reasoning": state.get("router_reasoning"),
+                        "filters": state.get("filters", {}),
+                        # Passing targeted reflection feedback prevents a naive
+                        # retry from simply producing the same flawed answer again.
+                        "previous_evaluation_reasoning": state.get("evaluation_reasoning"),
+                        "previous_missing_aspects": state.get("missing_aspects", []),
+                        "retry_count": state.get("retry_count", 0),
                         "conversation_history": state.get("conversation_history", []),
                         "evidence": state.get("evidence", []),
                         "sql_rows": state.get("sql_rows", []),

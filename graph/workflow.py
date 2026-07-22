@@ -4,7 +4,16 @@ from __future__ import annotations
 
 from langgraph.graph import END, START, StateGraph
 
-from graph.nodes import analytical_node, answer_node, classify_node, compose_node, hybrid_node, semantic_node
+from graph.nodes import (
+    MAX_ANSWER_RETRIES,
+    analytical_node,
+    answer_node,
+    classify_node,
+    compose_node,
+    evaluate_answer_node,
+    hybrid_node,
+    semantic_node,
+)
 from graph.state import MaintenanceState
 
 
@@ -15,6 +24,16 @@ def _route_node(state: MaintenanceState) -> str:
     return "hybrid"
 
 
+def _route_after_evaluation(state: MaintenanceState) -> str:
+    if state.get("is_sufficient") is True:
+        return "compose"
+    if int(state.get("retry_count", 0)) >= MAX_ANSWER_RETRIES:
+        # The cap guarantees graceful degradation: the graph surfaces a caveat
+        # in compose instead of looping forever or silently pretending certainty.
+        return "compose"
+    return "answer"
+
+
 def _build_graph():
     graph = StateGraph(MaintenanceState)
     graph.add_node("classify", classify_node)
@@ -22,6 +41,7 @@ def _build_graph():
     graph.add_node("semantic", semantic_node)
     graph.add_node("hybrid", hybrid_node)
     graph.add_node("answer", answer_node)
+    graph.add_node("evaluate_answer", evaluate_answer_node)
     graph.add_node("compose", compose_node)
 
     graph.add_edge(START, "classify")
@@ -33,7 +53,12 @@ def _build_graph():
     graph.add_edge("analytical", "answer")
     graph.add_edge("semantic", "answer")
     graph.add_edge("hybrid", "answer")
-    graph.add_edge("answer", "compose")
+    graph.add_edge("answer", "evaluate_answer")
+    graph.add_conditional_edges(
+        "evaluate_answer",
+        _route_after_evaluation,
+        {"answer": "answer", "compose": "compose"},
+    )
     graph.add_edge("compose", END)
     return graph.compile()
 

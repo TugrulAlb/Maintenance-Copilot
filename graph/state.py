@@ -11,9 +11,16 @@ class MaintenanceState(TypedDict, total=False):
     question: str
     thread_id: str
     query_type: str
+    router_confidence: float
+    router_reasoning: str
     answer: str
     node_trace: list[str]
     filters: dict[str, Any]
+    is_sufficient: bool | None
+    evaluation_reasoning: str | None
+    missing_aspects: list[str] | None
+    retry_count: int
+    hit_retry_cap: bool
     conversation_history: list[dict[str, object]]
     sql_rows: list[dict[str, object]]
     sql_query: str

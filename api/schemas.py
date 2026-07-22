@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from pydantic import BaseModel
+from typing import Any
+
+from pydantic import BaseModel, Field
 
 
 class QuestionRequest(BaseModel):
@@ -19,4 +21,12 @@ class AnswerResponse(BaseModel):
     query_type: str
     thread_id: str
     node_trace: list[str]
-    citations: list[str] = []
+    citations: list[str] = Field(default_factory=list)
+    filters: dict[str, Any] = Field(default_factory=dict)
+    router_confidence: float | None = None
+    router_reasoning: str | None = None
+    is_sufficient: bool | None = None
+    evaluation_reasoning: str | None = None
+    missing_aspects: list[str] | None = None
+    retry_count: int = 0
+    hit_retry_cap: bool = False

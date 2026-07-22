@@ -27,8 +27,9 @@ def render_index_html() -> str:
     button:disabled { opacity: .6; cursor: wait; }
     button:hover { background: #1e293b; }
     pre { white-space: pre-wrap; background: #0f172a; color: #e2e8f0; padding: 16px; border-radius: 12px; overflow-x: auto; }
-    .meta { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin-top: 18px; }
+    .meta { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-top: 18px; }
     .pill { background: #e2e8f0; border-radius: 999px; padding: 6px 10px; display: inline-block; margin-right: 6px; margin-bottom: 6px; }
+    @media (max-width: 720px) { .row, .meta { grid-template-columns: 1fr; } }
   </style>
 </head>
 <body>
@@ -51,9 +52,14 @@ def render_index_html() -> str:
       <button id="askBtn">Ask</button>
       <div class="meta">
         <div><strong>Query Type</strong><div id="queryType">-</div></div>
+        <div><strong>Confidence</strong><div id="confidence">-</div></div>
         <div><strong>Request ID</strong><div id="requestId">-</div></div>
         <div><strong>Thread</strong><div id="threadOut">-</div></div>
       </div>
+      <h3>Router</h3>
+      <pre id="router">Waiting for a question...</pre>
+      <h3>Evaluation</h3>
+      <pre id="evaluation">Waiting for a question...</pre>
       <h3>Answer</h3>
       <pre id="answer">Waiting for a question...</pre>
       <h3>Citations</h3>
@@ -67,8 +73,11 @@ def render_index_html() -> str:
     const answerEl = document.getElementById('answer');
     const citationsEl = document.getElementById('citations');
     const queryTypeEl = document.getElementById('queryType');
+    const confidenceEl = document.getElementById('confidence');
     const requestIdEl = document.getElementById('requestId');
     const threadOutEl = document.getElementById('threadOut');
+    const routerEl = document.getElementById('router');
+    const evaluationEl = document.getElementById('evaluation');
     const askBtn = document.getElementById('askBtn');
 
     function renderPill(text) {
@@ -103,8 +112,22 @@ def render_index_html() -> str:
         const data = await response.json();
         if (!response.ok) throw new Error(data.detail || 'Request failed');
         queryTypeEl.textContent = data.query_type || '-';
+        confidenceEl.textContent = typeof data.router_confidence === 'number'
+          ? data.router_confidence.toFixed(2)
+          : '-';
         threadOutEl.textContent = data.thread_id || '-';
         threadIdEl.value = data.thread_id || threadIdEl.value;
+        routerEl.textContent = JSON.stringify({
+          reasoning: data.router_reasoning || '',
+          filters: data.filters || {},
+        }, null, 2);
+        evaluationEl.textContent = JSON.stringify({
+          is_sufficient: data.is_sufficient,
+          retry_count: data.retry_count,
+          hit_retry_cap: data.hit_retry_cap,
+          missing_aspects: data.missing_aspects || [],
+          reasoning: data.evaluation_reasoning || '',
+        }, null, 2);
         answerEl.textContent = data.answer || 'No answer returned';
         const citations = data.citations || [];
         citationsEl.innerHTML = '';
@@ -115,6 +138,8 @@ def render_index_html() -> str:
         }
       } catch (error) {
         answerEl.textContent = error.message || 'Request failed';
+        routerEl.textContent = 'Request failed';
+        evaluationEl.textContent = 'Request failed';
       } finally {
         askBtn.disabled = false;
       }

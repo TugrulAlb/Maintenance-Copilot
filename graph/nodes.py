@@ -2,28 +2,21 @@
 
 from __future__ import annotations
 
+import json
 import sqlite3
 from pathlib import Path
-import re
 from typing import Any
 
 from graph.answering import generate_answer
-from graph.classifier import classify_intent
+from graph.classifier import classify_question, extract_filters_fallback
+from graph.llm_client import build_chat_client, chat_model
 from graph.sql_agent import run_sql_agent
 from graph.state import MaintenanceState
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DB_PATH = PROJECT_ROOT / "data" / "maintenance_logs.db"
-
-FAULT_CATEGORY_ALIASES = {
-    "motor failure": ["motor failure", "motor", "motor arız", "motor ariza"],
-    "sensor error": ["sensor error", "sensör", "sensor", "sensör hatası", "sensor hatası"],
-    "belt misalignment": ["belt misalignment", "belt", "kayış", "hiza", "misalignment"],
-    "overheating": ["overheating", "ısın", "sicak", "sıcak", "heat", "overheat"],
-    "electrical fault": ["electrical fault", "electrical", "elektrik", "voltaj", "power", "wiring"],
-}
-
+MAX_ANSWER_RETRIES = 2
 
 def _append_trace(state: MaintenanceState, node_name: str) -> MaintenanceState:
     state = dict(state)
@@ -33,61 +26,16 @@ def _append_trace(state: MaintenanceState, node_name: str) -> MaintenanceState:
     return state
 
 
-def _normalize_question(question: str) -> str:
-    return question.lower().strip()
-
-
-def _detect_fault_category(question: str) -> str | None:
-    lowered = _normalize_question(question)
-    for category, aliases in FAULT_CATEGORY_ALIASES.items():
-        if any(alias in lowered for alias in aliases):
-            return category
-    return None
-
-
-def _detect_line(question: str) -> str | None:
-    lowered = _normalize_question(question)
-    match = re.search(r"\b(?:line|hat)\s*([123])\b", lowered)
-    if match:
-        return f"Line {match.group(1)}"
-    return None
-
-
-def _detect_machine_id(question: str) -> str | None:
-    match = re.search(r"\b(?:mc|machine|makine)[-\s]?(\d{2,4})\b", question, flags=re.IGNORECASE)
-    if not match:
-        return None
-    return f"MC-{match.group(1)}"
-
-
-def _detect_severity(question: str) -> str | None:
-    lowered = _normalize_question(question)
-    aliases = {
-        "high": ["high", "yüksek", "yuksek", "kritik", "critical"],
-        "medium": ["medium", "orta"],
-        "low": ["low", "düşük", "dusuk"],
-    }
-    for severity, terms in aliases.items():
-        if any(term in lowered for term in terms):
-            return severity
-    return None
+def _evaluation_summary(is_sufficient: bool, missing_aspects: list[str]) -> str:
+    if is_sufficient:
+        return "evaluate_answer (sufficient)"
+    if missing_aspects:
+        return f"evaluate_answer (insufficient: missing {', '.join(missing_aspects[:3])})"
+    return "evaluate_answer (insufficient)"
 
 
 def build_filters(question: str) -> dict[str, Any]:
-    filters: dict[str, Any] = {}
-    fault_category = _detect_fault_category(question)
-    line = _detect_line(question)
-    machine_id = _detect_machine_id(question)
-    severity = _detect_severity(question)
-    if fault_category:
-        filters["fault_category"] = fault_category
-    if line:
-        filters["production_line"] = line
-    if machine_id:
-        filters["machine_id"] = machine_id
-    if severity:
-        filters["severity"] = severity
-    return filters
+    return extract_filters_fallback(question)
 
 
 def load_rows() -> list[sqlite3.Row]:
@@ -115,8 +63,16 @@ def load_rows() -> list[sqlite3.Row]:
 def classify_node(state: MaintenanceState) -> MaintenanceState:
     state = _append_trace(state, "classify")
     question = state["question"]
-    state["query_type"] = classify_intent(question)
-    state["filters"] = build_filters(question)
+    decision = classify_question(question, state.get("conversation_history", []))
+    state["query_type"] = decision.intent
+    state["filters"] = decision.filters
+    state["router_confidence"] = decision.confidence
+    state["router_reasoning"] = decision.reasoning
+    state["retry_count"] = int(state.get("retry_count", 0))
+    state["is_sufficient"] = None
+    state["evaluation_reasoning"] = None
+    state["missing_aspects"] = None
+    state["hit_retry_cap"] = False
     return state
 
 
@@ -193,7 +149,8 @@ def hybrid_node(state: MaintenanceState) -> MaintenanceState:
 
 
 def answer_node(state: MaintenanceState) -> MaintenanceState:
-    state = _append_trace(state, "answer")
+    attempt = int(state.get("retry_count", 0)) + 1
+    state = _append_trace(state, f"answer (attempt {attempt})")
     generated = generate_answer(state)
     state["answer"] = str(generated.get("answer", state.get("answer", "")))
     citations = generated.get("citations", state.get("citations", []))
@@ -202,10 +159,120 @@ def answer_node(state: MaintenanceState) -> MaintenanceState:
     return state
 
 
+def _deterministic_evaluate_answer(state: MaintenanceState) -> dict[str, object]:
+    answer = str(state.get("answer", "")).strip()
+    evidence = state.get("evidence", [])
+    citations = state.get("citations", [])
+    missing_aspects: list[str] = []
+    if not answer:
+        missing_aspects.append("draft answer is empty")
+    if evidence and not citations:
+        missing_aspects.append("evidence is available but citations are missing")
+    if not evidence:
+        missing_aspects.append("no evidence was available for verification")
+
+    return {
+        "is_sufficient": bool(answer) and not missing_aspects,
+        "missing_aspects": missing_aspects,
+        "reasoning": "Deterministic evaluator fallback checked answer presence, evidence, and citations.",
+    }
+
+
+def evaluate_draft_answer(state: MaintenanceState) -> dict[str, object]:
+    """Evaluate a draft answer against the graph evidence.
+
+    This is a self-correction/reflection pattern, not a multi-agent handoff:
+    one controlled evaluator checks one generator's draft inside the same graph.
+    There are no independent agents negotiating ownership or passing tasks around.
+    """
+
+    client = build_chat_client()
+    if client is None:
+        return _deterministic_evaluate_answer(state)
+
+    response = client.chat.completions.create(
+        model=chat_model("AZURE_OPENAI_EVALUATOR_DEPLOYMENT_NAME", "OPENAI_EVALUATOR_MODEL"),
+        temperature=0,
+        response_format={"type": "json_object"},
+        messages=[
+            {
+                "role": "system",
+                "content": (
+                    "You are an evaluator for an industrial maintenance copilot. "
+                    "Judge only whether the draft answer is grounded in the provided evidence. "
+                    "Return JSON with keys is_sufficient, missing_aspects, and reasoning."
+                ),
+            },
+            {
+                "role": "user",
+                "content": json.dumps(
+                    {
+                        "question": state.get("question"),
+                        "draft_answer": state.get("answer"),
+                        "query_type": state.get("query_type"),
+                        "router_filters": state.get("filters", {}),
+                        "router_reasoning": state.get("router_reasoning"),
+                        "sql_rows": state.get("sql_rows", []),
+                        "sql_query": state.get("sql_query"),
+                        "retrieved_chunks": state.get("results", []),
+                        "evidence": state.get("evidence", []),
+                        "citations": state.get("citations", []),
+                        "checks": [
+                            "Does the draft answer actually address the user's question?",
+                            "Is every substantive claim supported by SQL rows or retrieved chunks?",
+                            "Does it cite the evidence it should cite?",
+                        ],
+                    },
+                    ensure_ascii=False,
+                ),
+            },
+        ],
+    )
+
+    try:
+        payload = json.loads(response.choices[0].message.content or "{}")
+    except json.JSONDecodeError:
+        return _deterministic_evaluate_answer(state)
+    if not isinstance(payload, dict):
+        return _deterministic_evaluate_answer(state)
+
+    missing_aspects = payload.get("missing_aspects", [])
+    if not isinstance(missing_aspects, list):
+        missing_aspects = [str(missing_aspects)]
+
+    return {
+        "is_sufficient": bool(payload.get("is_sufficient", False)),
+        "missing_aspects": [str(item) for item in missing_aspects],
+        "reasoning": str(payload.get("reasoning", "Evaluator returned structured feedback.")),
+    }
+
+
+def evaluate_answer_node(state: MaintenanceState) -> MaintenanceState:
+    evaluation = evaluate_draft_answer(state)
+    retry_count = int(state.get("retry_count", 0)) + 1
+    missing_aspects = [str(item) for item in evaluation.get("missing_aspects", [])]
+    is_sufficient = bool(evaluation.get("is_sufficient", False))
+    hit_retry_cap = (not is_sufficient) and retry_count >= MAX_ANSWER_RETRIES
+
+    state = _append_trace(state, _evaluation_summary(is_sufficient, missing_aspects))
+    state["is_sufficient"] = is_sufficient
+    state["evaluation_reasoning"] = str(evaluation.get("reasoning", ""))
+    state["missing_aspects"] = missing_aspects
+    state["retry_count"] = retry_count
+    state["hit_retry_cap"] = hit_retry_cap
+    return state
+
+
 def compose_node(state: MaintenanceState) -> MaintenanceState:
     state = _append_trace(state, "compose")
     if not state.get("answer"):
         state["answer"] = "Soru işlendi ama yanıt üretilemedi."
+    if state.get("hit_retry_cap"):
+        reasoning = state.get("evaluation_reasoning") or "Evaluator was not fully satisfied after retries."
+        state["answer"] = (
+            "Not: Bu cevap otomatik değerlendirme döngüsünde tam yeterli bulunmadı; "
+            f"kısmen eksik olabilir. Değerlendirme: {reasoning}\n\n{state['answer']}"
+        )
     if not state.get("citations"):
         state["citations"] = []
     return state

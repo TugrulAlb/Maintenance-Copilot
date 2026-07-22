@@ -12,6 +12,29 @@ Maintenance Copilot is a portfolio project for semantic and analytical question 
 - `evaluation/` runs regression checks for routing, graph nodes, citations, and answer content.
 - `docker/`, `k8s/`, and `.github/workflows/` are reserved for deployment assets.
 
+## Routing architecture
+
+The LangGraph workflow starts with a structured LLM router. It returns an
+`intent` (`analytical`, `semantic`, or `hybrid`), confidence, a short reasoning
+string, and safe metadata filters such as `production_line`, `fault_category`,
+`machine_id`, and `severity`.
+
+- `analytical` questions go to the NL2SQL agent over `maintenance_logs`.
+- `semantic` questions go to hybrid retrieval: dense vector search plus BM25,
+  Reciprocal Rank Fusion, then reranking.
+- `hybrid` questions run both NL2SQL and hybrid retrieval before answer
+  generation.
+
+After answer generation, the graph runs an `evaluate_answer` reflection step.
+The evaluator checks whether the draft addresses the question, is supported by
+the evidence, and includes the needed citations. If it finds gaps, the graph
+sends targeted `missing_aspects` feedback back into the answer node for one more
+attempt. A hard retry cap prevents infinite loops; when the cap is reached, the
+compose node returns the best available answer with a soft caveat.
+
+When no model credentials are configured, the router falls back to a deterministic
+local classifier with the same output shape so tests and local demos still run.
+
 ## Synthetic data generation
 
 The data generator uses an OpenAI-compatible client to batch-generate natural language fault descriptions so later semantic search tests have real linguistic variety to work with. Structured fields are generated locally to keep the dataset deterministic and easy to inspect.

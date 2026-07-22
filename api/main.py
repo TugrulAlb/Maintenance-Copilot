@@ -21,7 +21,6 @@ from api.conversation_store import CONVERSATIONS
 from api.rate_limit import enforce_rate_limit
 from api.ui import render_index_html
 from api.schemas import AnswerResponse, QuestionRequest
-from graph.classifier import classify_intent
 from graph.build_graph import get_graph_app
 
 
@@ -70,12 +69,23 @@ def _extract_response(payload: Any, fallback_thread_id: str, fallback_query_type
         node_trace = payload.get("node_trace", payload.get("trace", []))
         if not isinstance(node_trace, list):
             node_trace = [str(node_trace)]
+        filters = payload.get("filters", {})
+        if not isinstance(filters, dict):
+            filters = {}
         return AnswerResponse(
             answer=answer,
             query_type=query_type,
             thread_id=thread_id,
             node_trace=[str(node) for node in node_trace],
             citations=[str(item) for item in payload.get("citations", [])] if isinstance(payload.get("citations", []), list) else [],
+            filters=filters,
+            router_confidence=payload.get("router_confidence") if isinstance(payload.get("router_confidence"), (float, int)) else None,
+            router_reasoning=str(payload.get("router_reasoning")) if payload.get("router_reasoning") else None,
+            is_sufficient=payload.get("is_sufficient") if isinstance(payload.get("is_sufficient"), bool) else None,
+            evaluation_reasoning=str(payload.get("evaluation_reasoning")) if payload.get("evaluation_reasoning") else None,
+            missing_aspects=[str(item) for item in payload.get("missing_aspects", [])] if isinstance(payload.get("missing_aspects"), list) else None,
+            retry_count=int(payload.get("retry_count", 0)) if isinstance(payload.get("retry_count", 0), int) else 0,
+            hit_retry_cap=bool(payload.get("hit_retry_cap", False)),
         )
 
     return AnswerResponse(
@@ -193,9 +203,7 @@ def ask(
     """Invoke the compiled LangGraph app and return the assistant answer."""
 
     thread_id = request.thread_id or str(uuid4())
-    query_type = classify_intent(request.question)
     http_request.state.question = request.question
-    http_request.state.query_type = query_type
     conversation_history = CONVERSATIONS.get_history(thread_id)
 
     graph_app = get_graph_app()
@@ -203,13 +211,13 @@ def ask(
         {
             "question": request.question,
             "thread_id": thread_id,
-            "query_type": query_type,
             "conversation_history": conversation_history,
         },
         config={"configurable": {"thread_id": thread_id}},
     )
 
-    response = _extract_response(result, fallback_thread_id=thread_id, fallback_query_type=query_type)
+    response = _extract_response(result, fallback_thread_id=thread_id, fallback_query_type="hybrid")
+    http_request.state.query_type = response.query_type
     CONVERSATIONS.append_turn(thread_id, request.question, response.answer, response.query_type, response.citations)
     return response
 

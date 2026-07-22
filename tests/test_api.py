@@ -38,8 +38,7 @@ def test_metrics_endpoint_exists() -> None:
 
 
 @patch("api.main.get_graph_app")
-@patch("api.main.classify_intent", return_value="semantic")
-def test_ask_endpoint_uses_stubbed_graph(mock_classify_intent: MagicMock, mock_get_graph_app: MagicMock) -> None:
+def test_ask_endpoint_uses_stubbed_graph(mock_get_graph_app: MagicMock) -> None:
     mock_graph = MagicMock()
     mock_graph.invoke.return_value = {
         "answer": "Motor failure found on Line 1",
@@ -47,6 +46,9 @@ def test_ask_endpoint_uses_stubbed_graph(mock_classify_intent: MagicMock, mock_g
         "thread_id": "thread-123",
         "node_trace": ["retrieve", "rerank", "answer"],
         "citations": ["Record #1: Line 1 / motor failure"],
+        "filters": {"production_line": "Line 1"},
+        "router_confidence": 0.9,
+        "router_reasoning": "semantic issue lookup",
     }
     mock_get_graph_app.return_value = mock_graph
 
@@ -63,12 +65,14 @@ def test_ask_endpoint_uses_stubbed_graph(mock_classify_intent: MagicMock, mock_g
     assert body["thread_id"] == "thread-123"
     assert body["node_trace"] == ["retrieve", "rerank", "answer"]
     assert body["citations"] == ["Record #1: Line 1 / motor failure"]
+    assert body["filters"] == {"production_line": "Line 1"}
+    assert body["router_confidence"] == 0.9
+    assert body["router_reasoning"] == "semantic issue lookup"
     mock_graph.invoke.assert_called_once()
 
 
 @patch("api.main.get_graph_app")
-@patch("api.main.classify_intent", return_value="semantic")
-def test_ask_endpoint_generates_thread_id_when_missing(mock_classify_intent: MagicMock, mock_get_graph_app: MagicMock) -> None:
+def test_ask_endpoint_generates_thread_id_when_missing(mock_get_graph_app: MagicMock) -> None:
     mock_graph = MagicMock()
     mock_graph.invoke.return_value = {
         "answer": "Sensor issue logged",
@@ -92,8 +96,7 @@ def test_ask_endpoint_generates_thread_id_when_missing(mock_classify_intent: Mag
 
 
 @patch("api.main.get_graph_app")
-@patch("api.main.classify_intent", return_value="analytical")
-def test_authentication_and_authorization(mock_classify_intent: MagicMock, mock_get_graph_app: MagicMock, monkeypatch) -> None:
+def test_authentication_and_authorization(mock_get_graph_app: MagicMock, monkeypatch) -> None:
     monkeypatch.setenv("MAINTENANCE_COPILOT_API_KEYS", "user-key,admin-key")
     monkeypatch.setenv("MAINTENANCE_COPILOT_ADMIN_KEYS", "admin-key")
     reset_rate_limiter()
@@ -139,8 +142,7 @@ def test_public_demo_mode_can_be_disabled(monkeypatch) -> None:
 
 
 @patch("api.main.get_graph_app")
-@patch("api.main.classify_intent", return_value="semantic")
-def test_rate_limit_returns_429(mock_classify_intent: MagicMock, mock_get_graph_app: MagicMock, monkeypatch) -> None:
+def test_rate_limit_returns_429(mock_get_graph_app: MagicMock, monkeypatch) -> None:
     monkeypatch.setenv("MAINTENANCE_COPILOT_API_KEYS", "user-key")
     monkeypatch.setenv("MAINTENANCE_COPILOT_RATE_LIMIT_PER_MINUTE", "1")
     reset_rate_limiter()

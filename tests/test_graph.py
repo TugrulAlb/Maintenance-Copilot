@@ -16,6 +16,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 import graph.build_graph as build_graph
 import graph.nodes as nodes
+from graph.classifier import RouteDecision
 
 
 class _FakeRetriever:
@@ -37,7 +38,12 @@ class _FakeReranker:
 
 
 def test_graph_analytical_branch(monkeypatch) -> None:
-    monkeypatch.setattr(nodes, "classify_intent", lambda question: "analytical")
+    monkeypatch.setattr(nodes, "classify_question", lambda question, conversation_history=None: RouteDecision(
+        intent="analytical",
+        confidence=0.91,
+        reasoning="test route",
+        filters={"fault_category": "motor failure"},
+    ))
     monkeypatch.setattr(nodes, "run_sql_agent", lambda question, filters, conversation_history=None: {
         "sql_query": "SELECT * FROM maintenance_logs WHERE fault_category = 'motor failure'",
         "reasoning": "stubbed test query",
@@ -77,13 +83,28 @@ def test_graph_analytical_branch(monkeypatch) -> None:
     )
 
     assert result["query_type"] == "analytical"
+    assert result["filters"] == {"fault_category": "motor failure"}
+    assert result["router_confidence"] == 0.91
     assert "Line 1" in result["answer"] and "Line 2" in result["answer"]
-    assert result["node_trace"] == ["classify", "analytical", "answer", "compose"]
+    assert result["node_trace"] == [
+        "classify",
+        "analytical",
+        "answer (attempt 1)",
+        "evaluate_answer (sufficient)",
+        "compose",
+    ]
+    assert result["is_sufficient"] is True
+    assert result["retry_count"] == 1
     assert result["citations"]
 
 
 def test_graph_semantic_branch(monkeypatch) -> None:
-    monkeypatch.setattr(nodes, "classify_intent", lambda question: "semantic")
+    monkeypatch.setattr(nodes, "classify_question", lambda question, conversation_history=None: RouteDecision(
+        intent="semantic",
+        confidence=0.88,
+        reasoning="test route",
+        filters={},
+    ))
     monkeypatch.setattr(nodes, "load_rows", lambda: [])
     monkeypatch.setattr(nodes, "_make_hybrid_retriever", _FakeRetriever)
     monkeypatch.setattr(nodes, "_make_reranker", _FakeReranker)
@@ -98,12 +119,23 @@ def test_graph_semantic_branch(monkeypatch) -> None:
 
     assert result["query_type"] == "semantic"
     assert "Line 2" in result["answer"]
-    assert result["node_trace"] == ["classify", "semantic", "answer", "compose"]
+    assert result["node_trace"] == [
+        "classify",
+        "semantic",
+        "answer (attempt 1)",
+        "evaluate_answer (sufficient)",
+        "compose",
+    ]
     assert result["citations"]
 
 
 def test_graph_hybrid_branch_combines_sql_and_retrieval(monkeypatch) -> None:
-    monkeypatch.setattr(nodes, "classify_intent", lambda question: "hybrid")
+    monkeypatch.setattr(nodes, "classify_question", lambda question, conversation_history=None: RouteDecision(
+        intent="hybrid",
+        confidence=0.93,
+        reasoning="needs both sql and retrieval",
+        filters={"production_line": "Line 2", "fault_category": "motor failure"},
+    ))
     monkeypatch.setattr(nodes, "_make_hybrid_retriever", _FakeRetriever)
     monkeypatch.setattr(nodes, "_make_reranker", _FakeReranker)
     monkeypatch.setattr(nodes, "run_sql_agent", lambda question, filters, conversation_history=None: {
@@ -129,7 +161,15 @@ def test_graph_hybrid_branch_combines_sql_and_retrieval(monkeypatch) -> None:
     assert result["query_type"] == "hybrid"
     assert "Analytical sonuç" in result["answer"]
     assert "Semantic olarak" in result["answer"]
-    assert result["node_trace"] == ["classify", "hybrid", "analytical", "semantic", "answer", "compose"]
+    assert result["node_trace"] == [
+        "classify",
+        "hybrid",
+        "analytical",
+        "semantic",
+        "answer (attempt 1)",
+        "evaluate_answer (sufficient)",
+        "compose",
+    ]
     assert len(result["citations"]) == 2
 
 
@@ -142,3 +182,96 @@ def test_metadata_filter_extraction() -> None:
         "machine_id": "MC-101",
         "severity": "high",
     }
+
+
+def test_answer_reflection_retries_with_targeted_feedback(monkeypatch) -> None:
+    monkeypatch.setattr(nodes, "classify_question", lambda question, conversation_history=None: RouteDecision(
+        intent="analytical",
+        confidence=0.9,
+        reasoning="test route",
+        filters={"production_line": "Line 2"},
+    ))
+    monkeypatch.setattr(nodes, "run_sql_agent", lambda question, filters, conversation_history=None: {
+        "sql_query": "SELECT production_line, COUNT(*) AS issue_count FROM maintenance_logs WHERE production_line = 'Line 2' LIMIT 10",
+        "reasoning": "stubbed query",
+        "rows": [{"production_line": "Line 2", "issue_count": 4}],
+        "citations": ["SQLite: maintenance_logs query -> SELECT production_line"],
+    })
+
+    generated_answers = iter([
+        {"answer": "Line 2 için sayı verilmedi.", "citations": ["SQLite: maintenance_logs query -> SELECT production_line"]},
+        {"answer": "Line 2 için 4 kayıt bulundu.", "citations": ["SQLite: maintenance_logs query -> SELECT production_line"]},
+    ])
+    evaluations = iter([
+        {"is_sufficient": False, "missing_aspects": ["include the issue count"], "reasoning": "The count is missing."},
+        {"is_sufficient": True, "missing_aspects": [], "reasoning": "The answer includes the count."},
+    ])
+    seen_missing_aspects = []
+
+    def fake_generate_answer(state):
+        seen_missing_aspects.append(list(state.get("missing_aspects", []) or []))
+        return next(generated_answers)
+
+    monkeypatch.setattr(nodes, "generate_answer", fake_generate_answer)
+    monkeypatch.setattr(nodes, "evaluate_draft_answer", lambda state: next(evaluations))
+
+    result = build_graph.get_graph_app().invoke(
+        {
+            "question": "Line 2'de kaç kayıt var?",
+            "thread_id": "retry-thread",
+        }
+    )
+
+    assert result["answer"] == "Line 2 için 4 kayıt bulundu."
+    assert result["retry_count"] == 2
+    assert result["hit_retry_cap"] is False
+    assert seen_missing_aspects == [[], ["include the issue count"]]
+    assert result["node_trace"] == [
+        "classify",
+        "analytical",
+        "answer (attempt 1)",
+        "evaluate_answer (insufficient: missing include the issue count)",
+        "answer (attempt 2)",
+        "evaluate_answer (sufficient)",
+        "compose",
+    ]
+
+
+def test_answer_reflection_caps_retries_and_softens_answer(monkeypatch) -> None:
+    monkeypatch.setattr(nodes, "classify_question", lambda question, conversation_history=None: RouteDecision(
+        intent="semantic",
+        confidence=0.8,
+        reasoning="test route",
+        filters={},
+    ))
+    monkeypatch.setattr(nodes, "_make_hybrid_retriever", _FakeRetriever)
+    monkeypatch.setattr(nodes, "_make_reranker", _FakeReranker)
+    monkeypatch.setattr(
+        nodes,
+        "evaluate_draft_answer",
+        lambda state: {
+            "is_sufficient": False,
+            "missing_aspects": ["cite the retrieved record"],
+            "reasoning": "Citation is not specific enough.",
+        },
+    )
+
+    result = build_graph.get_graph_app().invoke(
+        {
+            "question": "benzer bakım kayıtlarını göster",
+            "thread_id": "cap-thread",
+        }
+    )
+
+    assert result["retry_count"] == 2
+    assert result["hit_retry_cap"] is True
+    assert "kısmen eksik olabilir" in result["answer"]
+    assert result["node_trace"] == [
+        "classify",
+        "semantic",
+        "answer (attempt 1)",
+        "evaluate_answer (insufficient: missing cite the retrieved record)",
+        "answer (attempt 2)",
+        "evaluate_answer (insufficient: missing cite the retrieved record)",
+        "compose",
+    ]
