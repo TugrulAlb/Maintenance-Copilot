@@ -59,15 +59,26 @@ class HybridRetriever:
         merged = sorted(fused.values(), key=lambda item: item["rrf_score"], reverse=True)
         return merged
 
-    def search(self, query: str, top_k_each: int = 15) -> list[dict[str, Any]]:
+    @staticmethod
+    def _matches_filters(metadata: dict[str, Any], filters: dict[str, Any] | None) -> bool:
+        if not filters:
+            return True
+        for key, expected in filters.items():
+            if isinstance(expected, dict):
+                continue
+            if metadata.get(key) != expected:
+                return False
+        return True
+
+    def search(self, query: str, top_k_each: int = 15, filters: dict[str, Any] | None = None) -> list[dict[str, Any]]:
         """Search both retrievers independently and fuse the rankings with RRF."""
 
         # We intentionally fetch a wider candidate pool first, then re-rank later.
         # This "retrieve wide, rerank narrow" pattern keeps recall high while
         # reserving expensive cross-encoder scoring for only the best candidates.
         query_embedding = self.embedder.embed([query])[0]
-        vector_results = self.vector_store.query(query_embedding=query_embedding, top_k=top_k_each)
-        bm25_results = self.bm25_index.search(query=query, top_k=top_k_each)
+        vector_results = self.vector_store.query(query_embedding=query_embedding, top_k=top_k_each, filters=filters)
+        bm25_results = self.bm25_index.search(query=query, top_k=top_k_each * 3 if filters else top_k_each)
 
         bm25_ranked: list[dict[str, Any]] = []
         if bm25_results:
@@ -88,6 +99,8 @@ class HybridRetriever:
             }
             for doc_id, score in bm25_results:
                 payload = doc_lookup.get(str(doc_id), {"document": "", "metadata": {}})
+                if not self._matches_filters(payload["metadata"], filters):
+                    continue
                 bm25_ranked.append(
                     {
                         "id": str(doc_id),

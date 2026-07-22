@@ -1,0 +1,30 @@
+[
+  {
+    "question": "motor failure nedeniyle duran hatlar hangileri?",
+    "expected_query_type": "analytical",
+    "required_nodes": ["classify", "analytical", "answer", "compose"],
+    "expected_answer_terms": ["Analytical"],
+    "require_citations": true
+  },
+  {
+    "question": "sensör hatası olan makineler",
+    "expected_query_type": "semantic",
+    "required_nodes": ["classify", "semantic", "answer", "compose"],
+    "expected_answer_terms": [],
+    "require_citations": true
+  },
+  {
+    "question": "Line 3'te en çok hangi arızalar var?",
+    "expected_query_type": "analytical",
+    "required_nodes": ["classify", "analytical", "answer", "compose"],
+    "expected_answer_terms": ["Analytical"],
+    "require_citations": true
+  },
+  {
+    "question": "Line 2 motor failure trendini ve benzer kayıtları özetle",
+    "expected_query_type": "hybrid",
+    "required_nodes": ["classify", "hybrid", "analytical", "semantic", "answer", "compose"],
+    "expected_answer_terms": [],
+    "require_citations": true
+  }
+]

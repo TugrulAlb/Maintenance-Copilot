@@ -38,11 +38,13 @@ class VectorStore:
     def query(self, query_embedding: list[float], top_k: int, filters: dict[str, Any] | None = None) -> list[dict[str, Any]]:
         """Run a nearest-neighbor search with optional metadata filtering."""
 
-        result = self.collection.query(
-            query_embeddings=[query_embedding],
-            n_results=top_k,
-            where=filters,
-        )
+        query_kwargs: dict[str, Any] = {
+            "query_embeddings": [query_embedding],
+            "n_results": top_k,
+        }
+        if filters:
+            query_kwargs["where"] = filters
+        result = self.collection.query(**query_kwargs)
 
         ids = result.get("ids", [[]])[0]
         documents = result.get("documents", [[]])[0]

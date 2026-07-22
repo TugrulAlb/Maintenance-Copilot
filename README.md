@@ -5,8 +5,11 @@ Maintenance Copilot is a portfolio project for semantic and analytical question 
 ## What is here
 
 - `data/generate_synthetic_data.py` creates a SQLite database with realistic maintenance tickets and LLM-generated technician notes.
-- `ingestion/`, `retrieval/`, `graph/`, and `api/` are the main application layers that will be filled in next.
-- `tests/` is reserved for unit and integration coverage.
+- `ingestion/` chunks SQLite maintenance records and stores embeddings plus metadata in ChromaDB.
+- `retrieval/` combines vector search and BM25 with metadata filtering and reranking.
+- `graph/` contains the compiled LangGraph workflow with analytical, semantic, and hybrid branches.
+- `api/` exposes the browser UI, API-key auth, role checks, rate limiting, CORS, and metrics.
+- `evaluation/` runs regression checks for routing, graph nodes, citations, and answer content.
 - `docker/`, `k8s/`, and `.github/workflows/` are reserved for deployment assets.
 
 ## Synthetic data generation
@@ -39,6 +42,28 @@ Ask a question:
 curl -X POST http://127.0.0.1:8000/ask \
 	-H "Content-Type: application/json" \
 	-d '{"question":"Motor failure nedeniyle duran hatlar hangileri?"}'
+```
+
+Ask with API-key auth enabled:
+
+```bash
+MAINTENANCE_COPILOT_ALLOW_PUBLIC=false \
+MAINTENANCE_COPILOT_API_KEYS=demo-user-key,demo-admin-key \
+MAINTENANCE_COPILOT_ADMIN_KEYS=demo-admin-key \
+uvicorn api.main:app --reload
+```
+
+```bash
+curl -X POST http://127.0.0.1:8000/ask \
+	-H "Content-Type: application/json" \
+	-H "X-API-Key: demo-user-key" \
+	-d '{"question":"Line 2 motor failure trendini ve benzer kayıtları özetle"}'
+```
+
+Metrics require an admin key when auth is enabled:
+
+```bash
+curl -H "X-API-Key: demo-admin-key" http://127.0.0.1:8000/metrics
 ```
 
 Ask with an existing thread id:
@@ -76,8 +101,22 @@ docker compose exec api python ingestion/run_ingestion.py
 
 Once the container is healthy, the API is available at `http://127.0.0.1:8000`.
 
-## Next steps
+## Evaluation and tests
 
-- Add ingestion pipelines for SQLite records and text chunking.
-- Build hybrid retrieval with embeddings plus BM25.
-- Expose question answering through FastAPI.
+Run the automated tests:
+
+```bash
+pytest -q
+```
+
+Run the graph evaluation cases:
+
+```bash
+python evaluation/run_eval.py
+```
+
+## Production notes
+
+- Set `MAINTENANCE_COPILOT_ALLOW_PUBLIC=false` and configure `MAINTENANCE_COPILOT_API_KEYS`.
+- Set `MAINTENANCE_COPILOT_CORS_ORIGINS` to explicit frontend origins. `*` is rejected at startup.
+- Keep `/metrics` behind an admin key and scrape it from your monitoring stack.

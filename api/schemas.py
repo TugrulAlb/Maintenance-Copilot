@@ -19,3 +19,4 @@ class AnswerResponse(BaseModel):
     query_type: str
     thread_id: str
     node_trace: list[str]
+    citations: list[str] = []

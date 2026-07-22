@@ -24,6 +24,61 @@ from retrieval.hybrid_search import HybridRetriever
 from retrieval.reranker import Reranker
 
 
+class _FakeVectorStore:
+    def __init__(self) -> None:
+        self.filters = None
+        self.collection = self
+
+    def query(self, query_embedding, top_k, filters=None):
+        self.filters = filters
+        return [
+            {
+                "id": "1",
+                "document": "Line 2 motor failure",
+                "metadata": {"production_line": "Line 2", "fault_category": "motor failure"},
+                "score": 0.9,
+            }
+        ]
+
+    def get(self, ids, include):
+        return {
+            "ids": ["1", "2"],
+            "documents": ["Line 2 motor failure", "Line 1 sensor error"],
+            "metadatas": [
+                {"production_line": "Line 2", "fault_category": "motor failure"},
+                {"production_line": "Line 1", "fault_category": "sensor error"},
+            ],
+        }
+
+
+class _FakeBM25Index:
+    def search(self, query, top_k):
+        return [("1", 3.0), ("2", 2.0)]
+
+
+class _FakeEmbedder:
+    def embed(self, texts):
+        return [[0.1, 0.2, 0.3] for _ in texts]
+
+
+def test_hybrid_search_applies_metadata_filters_to_vector_and_bm25() -> None:
+    vector_store = _FakeVectorStore()
+    retriever = HybridRetriever(
+        vector_store=vector_store,
+        bm25_index=_FakeBM25Index(),
+        embedder=_FakeEmbedder(),
+    )
+
+    results = retriever.search(
+        "Line 2 motor failure",
+        top_k_each=5,
+        filters={"production_line": "Line 2", "fault_category": "motor failure"},
+    )
+
+    assert vector_store.filters == {"production_line": "Line 2", "fault_category": "motor failure"}
+    assert [item["id"] for item in results] == ["1"]
+
+
 def _project_root() -> Path:
     return Path(__file__).resolve().parents[1]
 
