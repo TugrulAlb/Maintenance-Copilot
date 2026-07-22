@@ -9,11 +9,12 @@ and tests still work offline.
 from __future__ import annotations
 
 import json
-import os
 from functools import lru_cache
 
 from dotenv import load_dotenv
 from openai import AzureOpenAI, OpenAI
+
+from graph.llm_client import build_chat_client, chat_model
 
 
 load_dotenv()
@@ -37,20 +38,7 @@ def _heuristic_classify(question: str) -> str:
 
 @lru_cache(maxsize=1)
 def _build_client() -> AzureOpenAI | OpenAI | None:
-    azure_key = os.getenv("AZURE_OPENAI_API_KEY")
-    azure_endpoint = os.getenv("AZURE_OPENAI_ENDPOINT")
-    if azure_key and azure_endpoint:
-        return AzureOpenAI(
-            api_key=azure_key,
-            azure_endpoint=azure_endpoint,
-            api_version=os.getenv("AZURE_OPENAI_API_VERSION", "2024-06-01"),
-        )
-
-    openai_key = os.getenv("OPENAI_API_KEY")
-    if openai_key:
-        return OpenAI(api_key=openai_key)
-
-    return None
+    return build_chat_client()
 
 
 def classify_intent(question: str) -> str:
@@ -64,11 +52,7 @@ def classify_intent(question: str) -> str:
     if client is None:
         return _heuristic_classify(question)
 
-    model = os.getenv("AZURE_OPENAI_CLASSIFIER_DEPLOYMENT_NAME") or os.getenv("OPENAI_CLASSIFIER_MODEL")
-    if not model:
-        # Reuse the main deployment/model as a sensible default when a dedicated
-        # classifier model is not configured.
-        model = os.getenv("AZURE_OPENAI_DEPLOYMENT_NAME") or os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+    model = chat_model("AZURE_OPENAI_CLASSIFIER_DEPLOYMENT_NAME", "OPENAI_CLASSIFIER_MODEL")
 
     response = client.chat.completions.create(
         model=model,

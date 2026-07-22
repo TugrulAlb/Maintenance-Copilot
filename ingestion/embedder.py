@@ -13,6 +13,8 @@ from typing import Sequence
 
 from openai import AzureOpenAI, OpenAI
 
+from graph.llm_client import build_chat_client
+
 
 class EmbeddingClient:
     """Batch embedding client using OpenAI-compatible APIs."""
@@ -23,16 +25,11 @@ class EmbeddingClient:
         )
         self.batch_size = batch_size
 
-        azure_key = os.getenv("AZURE_OPENAI_API_KEY")
-        azure_endpoint = os.getenv("AZURE_OPENAI_ENDPOINT")
-        if azure_key and azure_endpoint:
-            self._client: AzureOpenAI | OpenAI = AzureOpenAI(
-                api_key=azure_key,
-                azure_endpoint=azure_endpoint,
-                api_version=os.getenv("AZURE_OPENAI_API_VERSION", "2024-06-01"),
-            )
-        else:
+        client = build_chat_client()
+        if client is None:
             self._client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+        else:
+            self._client: AzureOpenAI | OpenAI = client
 
     def embed(self, texts: list[str]) -> list[list[float]]:
         """Embed texts in batches and preserve input order."""

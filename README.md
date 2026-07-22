@@ -22,6 +22,17 @@ Run it after setting environment variables from `.env.example`:
 python data/generate_synthetic_data.py --records 500
 ```
 
+For Azure OpenAI endpoints that use the OpenAI-compatible path, configure:
+
+```bash
+AZURE_OPENAI_API_KEY=your-key
+AZURE_OPENAI_ENDPOINT=https://topuz-openai.openai.azure.com/openai/v1
+AZURE_OPENAI_DEPLOYMENT_NAME=gpt-5.4-mini
+```
+
+Use `AZURE_OPENAI_EMBEDDING_DEPLOYMENT_NAME` separately for ingestion because
+retrieval embeddings require an embedding-capable deployment.
+
 ## Run the API locally
 
 Start the FastAPI server from the project root:

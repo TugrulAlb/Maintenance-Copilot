@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import os
 import re
 import sqlite3
 from pathlib import Path
@@ -11,6 +10,8 @@ from typing import Any
 
 from dotenv import load_dotenv
 from openai import AzureOpenAI, OpenAI
+
+from graph.llm_client import build_chat_client, chat_model
 
 
 load_dotenv()
@@ -31,20 +32,7 @@ ALLOWED_COLUMNS = {
 
 
 def _build_client() -> AzureOpenAI | OpenAI | None:
-    azure_key = os.getenv("AZURE_OPENAI_API_KEY")
-    azure_endpoint = os.getenv("AZURE_OPENAI_ENDPOINT")
-    if azure_key and azure_endpoint:
-        return AzureOpenAI(
-            api_key=azure_key,
-            azure_endpoint=azure_endpoint,
-            api_version=os.getenv("AZURE_OPENAI_API_VERSION", "2024-06-01"),
-        )
-
-    openai_key = os.getenv("OPENAI_API_KEY")
-    if openai_key:
-        return OpenAI(api_key=openai_key)
-
-    return None
+    return build_chat_client()
 
 
 def _load_schema_summary() -> str:
@@ -138,7 +126,7 @@ def run_sql_agent(question: str, filters: dict[str, Any], conversation_history: 
 
     if client is not None:
         response = client.chat.completions.create(
-            model=os.getenv("AZURE_OPENAI_SQL_AGENT_DEPLOYMENT_NAME") or os.getenv("OPENAI_SQL_AGENT_MODEL") or os.getenv("AZURE_OPENAI_DEPLOYMENT_NAME") or os.getenv("OPENAI_MODEL", "gpt-4o-mini"),
+            model=chat_model("AZURE_OPENAI_SQL_AGENT_DEPLOYMENT_NAME", "OPENAI_SQL_AGENT_MODEL"),
             temperature=0,
             response_format={"type": "json_object"},
             messages=[

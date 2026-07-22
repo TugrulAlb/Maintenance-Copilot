@@ -12,9 +12,9 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import random
 import sqlite3
+import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -23,6 +23,12 @@ from typing import Iterable
 
 from dotenv import load_dotenv
 from openai import AzureOpenAI, OpenAI
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from graph.llm_client import build_chat_client, chat_model
 
 
 FAULT_CATEGORIES = [
@@ -53,20 +59,9 @@ def build_client() -> AzureOpenAI | OpenAI:
     portfolio can later show cloud readiness without changing the script logic.
     """
 
-    azure_key = os.getenv("AZURE_OPENAI_API_KEY")
-    azure_endpoint = os.getenv("AZURE_OPENAI_ENDPOINT")
-    azure_deployment = os.getenv("AZURE_OPENAI_DEPLOYMENT_NAME")
-
-    if azure_key and azure_endpoint and azure_deployment:
-        return AzureOpenAI(
-            api_key=azure_key,
-            azure_endpoint=azure_endpoint,
-            api_version=os.getenv("AZURE_OPENAI_API_VERSION", "2024-06-01"),
-        )
-
-    openai_key = os.getenv("OPENAI_API_KEY")
-    if openai_key:
-        return OpenAI(api_key=openai_key)
+    client = build_chat_client()
+    if client is not None:
+        return client
 
     raise RuntimeError(
         "Set Azure OpenAI env vars or OPENAI_API_KEY before generating data."
@@ -129,7 +124,7 @@ def generate_description_batch(client: AzureOpenAI | OpenAI, batch_size: int, se
     """
 
     response = client.chat.completions.create(
-        model=os.getenv("AZURE_OPENAI_DEPLOYMENT_NAME") or os.getenv("OPENAI_MODEL", "gpt-4o-mini"),
+        model=chat_model(),
         temperature=1.0,
         response_format={"type": "json_object"},
         messages=[

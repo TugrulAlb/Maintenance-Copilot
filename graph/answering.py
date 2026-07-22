@@ -3,30 +3,18 @@
 from __future__ import annotations
 
 import json
-import os
 
 from dotenv import load_dotenv
 from openai import AzureOpenAI, OpenAI
+
+from graph.llm_client import build_chat_client, chat_model
 
 
 load_dotenv()
 
 
 def _build_client() -> AzureOpenAI | OpenAI | None:
-    azure_key = os.getenv("AZURE_OPENAI_API_KEY")
-    azure_endpoint = os.getenv("AZURE_OPENAI_ENDPOINT")
-    if azure_key and azure_endpoint:
-        return AzureOpenAI(
-            api_key=azure_key,
-            azure_endpoint=azure_endpoint,
-            api_version=os.getenv("AZURE_OPENAI_API_VERSION", "2024-06-01"),
-        )
-
-    openai_key = os.getenv("OPENAI_API_KEY")
-    if openai_key:
-        return OpenAI(api_key=openai_key)
-
-    return None
+    return build_chat_client()
 
 
 def _deterministic_answer(state: dict[str, object]) -> tuple[str, list[str]]:
@@ -77,7 +65,7 @@ def generate_answer(state: dict[str, object]) -> dict[str, object]:
         answer, citations = _deterministic_answer(state)
         return {"answer": answer, "citations": citations}
 
-    model = os.getenv("AZURE_OPENAI_ANSWER_DEPLOYMENT_NAME") or os.getenv("OPENAI_ANSWER_MODEL") or os.getenv("AZURE_OPENAI_DEPLOYMENT_NAME") or os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+    model = chat_model("AZURE_OPENAI_ANSWER_DEPLOYMENT_NAME", "OPENAI_ANSWER_MODEL")
     response = client.chat.completions.create(
         model=model,
         temperature=0.2,
