@@ -25,12 +25,16 @@ string, and safe metadata filters such as `production_line`, `fault_category`,
 - `hybrid` questions run both NL2SQL and hybrid retrieval before answer
   generation.
 
-After answer generation, the graph runs an `evaluate_answer` reflection step.
-The evaluator checks whether the draft addresses the question, is supported by
-the evidence, and includes the needed citations. If it finds gaps, the graph
-sends targeted `missing_aspects` feedback back into the answer node for one more
-attempt. A hard retry cap prevents infinite loops; when the cap is reached, the
-compose node returns the best available answer with a soft caveat.
+After answer generation, the graph runs an evidence-aware `evaluate_answer`
+reflection step. The evaluator checks whether the draft addresses the question,
+is supported by the evidence, and includes the needed citations. If it finds
+gaps, it can route either to `answer` for a composition-only retry or back to
+`analytical`/`semantic` for one evidence re-acquisition attempt. Hybrid questions
+can return plural `retry_targets` because SQL and retrieval evidence may
+independently be insufficient. Answer retries and evidence retries use separate
+counters because re-running SQL/retrieval is more expensive than rewriting an
+answer. A hard cap prevents infinite loops; when a cap is reached, the compose
+node returns the best available answer with a soft caveat.
 
 When no model credentials are configured, the router falls back to a deterministic
 local classifier with the same output shape so tests and local demos still run.

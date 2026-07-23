@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -28,5 +28,8 @@ class AnswerResponse(BaseModel):
     is_sufficient: bool | None = None
     evaluation_reasoning: str | None = None
     missing_aspects: list[str] | None = None
+    retry_target: Literal["answer", "analytical", "semantic"] | None = None
+    retry_targets: list[Literal["analytical", "semantic"]] | None = None
     retry_count: int = 0
+    evidence_retry_count: int = 0
     hit_retry_cap: bool = False

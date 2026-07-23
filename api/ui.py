@@ -123,7 +123,10 @@ def render_index_html() -> str:
         }, null, 2);
         evaluationEl.textContent = JSON.stringify({
           is_sufficient: data.is_sufficient,
-          retry_count: data.retry_count,
+          answer_retry_count: data.retry_count,
+          evidence_retry_count: data.evidence_retry_count,
+          retry_target: data.retry_target,
+          retry_targets: data.retry_targets || [],
           hit_retry_cap: data.hit_retry_cap,
           missing_aspects: data.missing_aspects || [],
           reasoning: data.evaluation_reasoning || '',

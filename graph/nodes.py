@@ -17,6 +17,8 @@ from graph.state import MaintenanceState
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DB_PATH = PROJECT_ROOT / "data" / "maintenance_logs.db"
 MAX_ANSWER_RETRIES = 2
+MAX_EVIDENCE_RETRIES = 1
+EVIDENCE_RETRY_TARGETS = {"analytical", "semantic"}
 
 def _append_trace(state: MaintenanceState, node_name: str) -> MaintenanceState:
     state = dict(state)
@@ -32,6 +34,35 @@ def _evaluation_summary(is_sufficient: bool, missing_aspects: list[str]) -> str:
     if missing_aspects:
         return f"evaluate_answer (insufficient: missing {', '.join(missing_aspects[:3])})"
     return "evaluate_answer (insufficient)"
+
+
+def _is_evidence_retry(state: MaintenanceState, target: str) -> bool:
+    retry_target = state.get("retry_target")
+    retry_targets = state.get("retry_targets") or []
+    return int(state.get("evidence_retry_count", 0)) > 0 and (
+        retry_target == target or target in retry_targets
+    )
+
+
+def _evidence_retry_label(target: str) -> str:
+    if target == "semantic":
+        return "semantic (evidence retry: widening search)"
+    if target == "analytical":
+        return "analytical (evidence retry: regenerating SQL)"
+    return f"{target} (evidence retry)"
+
+
+def _evaluation_feedback(state: MaintenanceState) -> dict[str, object]:
+    return {
+        "missing_aspects": state.get("missing_aspects", []),
+        "evaluation_reasoning": state.get("evaluation_reasoning"),
+        "retry_target": state.get("retry_target"),
+        "retry_targets": state.get("retry_targets", []),
+    }
+
+
+def _replace_evidence(state: MaintenanceState, kind: str, replacement: dict[str, object]) -> list[dict[str, object]]:
+    return [item for item in state.get("evidence", []) if item.get("kind") != kind] + [replacement]
 
 
 def build_filters(question: str) -> dict[str, Any]:
@@ -69,64 +100,84 @@ def classify_node(state: MaintenanceState) -> MaintenanceState:
     state["router_confidence"] = decision.confidence
     state["router_reasoning"] = decision.reasoning
     state["retry_count"] = int(state.get("retry_count", 0))
+    state["evidence_retry_count"] = int(state.get("evidence_retry_count", 0))
     state["is_sufficient"] = None
     state["evaluation_reasoning"] = None
     state["missing_aspects"] = None
+    state["retry_target"] = None
+    state["retry_targets"] = None
     state["hit_retry_cap"] = False
     return state
 
 
 def analytical_node(state: MaintenanceState) -> MaintenanceState:
-    state = _append_trace(state, "analytical")
+    is_retry = _is_evidence_retry(state, "analytical")
+    state = _append_trace(state, _evidence_retry_label("analytical") if is_retry else "analytical")
     question = state["question"]
     filters = state.get("filters", {})
-    sql_result = run_sql_agent(question, filters, state.get("conversation_history", []))
+    # On analytical evidence retries, widening means regenerating SQL with the
+    # previous query and evaluator feedback in prompt context, so the SQL agent
+    # can loosen an overly narrow WHERE clause or choose a more useful aggregate.
+    sql_result = run_sql_agent(
+        question,
+        filters,
+        state.get("conversation_history", []),
+        previous_sql_query=state.get("sql_query") if is_retry else None,
+        evaluation_feedback=_evaluation_feedback(state) if is_retry else None,
+    )
     rows = sql_result["rows"]
     state["sql_rows"] = rows
     state["sql_query"] = str(sql_result["sql_query"])
-    state["citations"] = list(sql_result.get("citations", []))
-    state["evidence"] = [
-        {
-            "kind": "sql",
-            "sql_query": sql_result["sql_query"],
-            "rows": rows,
-            "reasoning": sql_result.get("reasoning", ""),
-        }
-    ]
+    sql_citations = list(sql_result.get("citations", []))
+    if is_retry:
+        state["citations"] = [item for item in state.get("citations", []) if not str(item).startswith("SQLite:")] + sql_citations
+    else:
+        state["citations"] = sql_citations
 
-    if not rows:
-        state["evidence"] = [
-            {
-                "kind": "sql",
-                "sql_query": sql_result["sql_query"],
-                "rows": [],
-                "reasoning": sql_result.get("reasoning", ""),
-            }
-        ]
+    sql_evidence = {
+        "kind": "sql",
+        "sql_query": sql_result["sql_query"],
+        "rows": rows,
+        "reasoning": sql_result.get("reasoning", ""),
+    }
+    state["evidence"] = _replace_evidence(state, "sql", sql_evidence) if is_retry else [sql_evidence]
     return state
 
 
 def semantic_node(state: MaintenanceState) -> MaintenanceState:
-    state = _append_trace(state, "semantic")
+    is_retry = _is_evidence_retry(state, "semantic")
+    state = _append_trace(state, _evidence_retry_label("semantic") if is_retry else "semantic")
 
     retriever = _make_hybrid_retriever()
     reranker = _make_reranker()
     filters = state.get("filters", {})
-    candidates = retriever.search(state["question"], top_k_each=15, filters=filters)
-    reranked = reranker.rerank(state["question"], candidates, top_k=5)
+    # Widening makes evidence retries meaningfully different from the first pass:
+    # we ask each retriever for a larger pool and rerank more final chunks. If
+    # strict router filters produce no candidates, we retry once without filters
+    # because the original filters may have been too narrow.
+    top_k_each = 30 if is_retry else 15
+    rerank_top_k = 10 if is_retry else 5
+    candidates = retriever.search(state["question"], top_k_each=top_k_each, filters=filters)
+    if is_retry and not candidates and filters:
+        candidates = retriever.search(state["question"], top_k_each=top_k_each, filters=None)
+        state["loosened_filters_on_retry"] = True
+    reranked = reranker.rerank(state["question"], candidates, top_k=rerank_top_k)
 
     state["candidates"] = candidates
     state["results"] = reranked
-    state["evidence"] = [
-        {
-            "kind": "retrieval",
-            "items": reranked,
-        }
-    ]
-    state["citations"] = [
+    retrieval_evidence = {
+        "kind": "retrieval",
+        "items": reranked,
+    }
+    state["evidence"] = _replace_evidence(state, "retrieval", retrieval_evidence) if is_retry else [retrieval_evidence]
+    retrieval_citations = [
         f"Record #{item.get('id', '?')}: {item.get('metadata', {}).get('production_line', '?')} / {item.get('metadata', {}).get('fault_category', '?')}"
         for item in reranked[:5]
     ]
+    if is_retry:
+        state["citations"] = [item for item in state.get("citations", []) if not str(item).startswith("Record #")] + retrieval_citations
+    else:
+        state["citations"] = retrieval_citations
 
     if not reranked:
         return state
@@ -134,11 +185,17 @@ def semantic_node(state: MaintenanceState) -> MaintenanceState:
 
 
 def hybrid_node(state: MaintenanceState) -> MaintenanceState:
-    state = _append_trace(state, "hybrid")
+    state = _append_trace(state, "hybrid (evidence retry)" if int(state.get("evidence_retry_count", 0)) > 0 else "hybrid")
     analytical_state = analytical_node(dict(state))
     semantic_state = semantic_node(dict(state))
 
-    state["node_trace"] = list(dict.fromkeys(list(state.get("node_trace", [])) + ["analytical", "semantic"]))
+    state["node_trace"] = list(
+        dict.fromkeys(
+            list(state.get("node_trace", []))
+            + list(analytical_state.get("node_trace", []))[len(state.get("node_trace", [])) :]
+            + list(semantic_state.get("node_trace", []))[len(state.get("node_trace", [])) :]
+        )
+    )
     state["sql_rows"] = analytical_state.get("sql_rows", [])
     state["sql_query"] = analytical_state.get("sql_query", "")
     state["candidates"] = semantic_state.get("candidates", [])
@@ -149,7 +206,7 @@ def hybrid_node(state: MaintenanceState) -> MaintenanceState:
 
 
 def answer_node(state: MaintenanceState) -> MaintenanceState:
-    attempt = int(state.get("retry_count", 0)) + 1
+    attempt = sum(1 for item in state.get("node_trace", []) if str(item).startswith("answer (attempt")) + 1
     state = _append_trace(state, f"answer (attempt {attempt})")
     generated = generate_answer(state)
     state["answer"] = str(generated.get("answer", state.get("answer", "")))
@@ -170,11 +227,24 @@ def _deterministic_evaluate_answer(state: MaintenanceState) -> dict[str, object]
         missing_aspects.append("evidence is available but citations are missing")
     if not evidence:
         missing_aspects.append("no evidence was available for verification")
+    retry_target = "answer"
+    retry_targets: list[str] = []
+    if "no evidence was available for verification" in missing_aspects:
+        query_type = state.get("query_type")
+        if query_type == "analytical":
+            retry_target = "analytical"
+        elif query_type == "semantic":
+            retry_target = "semantic"
+        elif query_type == "hybrid":
+            retry_target = "answer"
+            retry_targets = ["analytical", "semantic"]
 
     return {
         "is_sufficient": bool(answer) and not missing_aspects,
         "missing_aspects": missing_aspects,
         "reasoning": "Deterministic evaluator fallback checked answer presence, evidence, and citations.",
+        "retry_target": None if bool(answer) and not missing_aspects else retry_target,
+        "retry_targets": retry_targets or None,
     }
 
 
@@ -200,7 +270,8 @@ def evaluate_draft_answer(state: MaintenanceState) -> dict[str, object]:
                 "content": (
                     "You are an evaluator for an industrial maintenance copilot. "
                     "Judge only whether the draft answer is grounded in the provided evidence. "
-                    "Return JSON with keys is_sufficient, missing_aspects, and reasoning."
+                    "If insufficient, decide whether the root cause is weak evidence or weak answer composition. "
+                    "Return JSON with keys is_sufficient, missing_aspects, reasoning, retry_target, and retry_targets."
                 ),
             },
             {
@@ -221,7 +292,16 @@ def evaluate_draft_answer(state: MaintenanceState) -> dict[str, object]:
                             "Does the draft answer actually address the user's question?",
                             "Is every substantive claim supported by SQL rows or retrieved chunks?",
                             "Does it cite the evidence it should cite?",
+                            "If the evidence itself is missing or insufficient, choose retry_target analytical or semantic.",
+                            "If this is a hybrid question and both SQL and retrieval evidence need repair, use retry_targets.",
+                            "If the evidence is enough but the answer failed to use it well, choose retry_target answer.",
                         ],
+                        "retry_target_rules": {
+                            "answer": "Use when evidence is sufficient but the draft answer is incomplete, poorly framed, or missing citations.",
+                            "analytical": "Use when SQL evidence is missing, too narrow, or does not answer the analytical part.",
+                            "semantic": "Use when retrieved chunks are missing, too narrow, or do not answer the semantic part.",
+                            "retry_targets": "For hybrid intent only, list analytical and/or semantic when more than one evidence source needs re-acquisition.",
+                        },
                     },
                     ensure_ascii=False,
                 ),
@@ -244,21 +324,60 @@ def evaluate_draft_answer(state: MaintenanceState) -> dict[str, object]:
         "is_sufficient": bool(payload.get("is_sufficient", False)),
         "missing_aspects": [str(item) for item in missing_aspects],
         "reasoning": str(payload.get("reasoning", "Evaluator returned structured feedback.")),
+        "retry_target": payload.get("retry_target"),
+        "retry_targets": payload.get("retry_targets"),
     }
+
+
+def _sanitize_retry_target(value: object) -> str | None:
+    if value in {"answer", "analytical", "semantic"}:
+        return str(value)
+    return None
+
+
+def _sanitize_retry_targets(value: object) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [str(item) for item in value if item in EVIDENCE_RETRY_TARGETS]
 
 
 def evaluate_answer_node(state: MaintenanceState) -> MaintenanceState:
     evaluation = evaluate_draft_answer(state)
-    retry_count = int(state.get("retry_count", 0)) + 1
     missing_aspects = [str(item) for item in evaluation.get("missing_aspects", [])]
     is_sufficient = bool(evaluation.get("is_sufficient", False))
-    hit_retry_cap = (not is_sufficient) and retry_count >= MAX_ANSWER_RETRIES
+    retry_count = int(state.get("retry_count", 0))
+    evidence_retry_count = int(state.get("evidence_retry_count", 0))
+    retry_target = None if is_sufficient else _sanitize_retry_target(evaluation.get("retry_target"))
+    retry_targets = [] if is_sufficient else _sanitize_retry_targets(evaluation.get("retry_targets"))
+
+    if not is_sufficient and retry_target is None and not retry_targets:
+        retry_target = "answer"
+
+    evidence_retry_requested = bool(retry_targets) or retry_target in EVIDENCE_RETRY_TARGETS
+    hit_retry_cap = False
+    # Answer retries and evidence retries have different cost profiles. Rewriting
+    # a final response is cheap; re-running retrieval or regenerating SQL can be
+    # slower and more expensive, so evidence re-acquisition gets its own tighter
+    # budget instead of sharing the answer-only retry budget.
+    if not is_sufficient and evidence_retry_requested:
+        if evidence_retry_count < MAX_EVIDENCE_RETRIES:
+            evidence_retry_count += 1
+        else:
+            hit_retry_cap = True
+    elif not is_sufficient and retry_target == "answer":
+        if retry_count < MAX_ANSWER_RETRIES:
+            retry_count += 1
+        else:
+            hit_retry_cap = True
 
     state = _append_trace(state, _evaluation_summary(is_sufficient, missing_aspects))
     state["is_sufficient"] = is_sufficient
     state["evaluation_reasoning"] = str(evaluation.get("reasoning", ""))
     state["missing_aspects"] = missing_aspects
+    state["retry_target"] = retry_target
+    state["retry_targets"] = retry_targets or None
     state["retry_count"] = retry_count
+    state["evidence_retry_count"] = evidence_retry_count
     state["hit_retry_cap"] = hit_retry_cap
     return state
 

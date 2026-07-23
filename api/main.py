@@ -84,7 +84,10 @@ def _extract_response(payload: Any, fallback_thread_id: str, fallback_query_type
             is_sufficient=payload.get("is_sufficient") if isinstance(payload.get("is_sufficient"), bool) else None,
             evaluation_reasoning=str(payload.get("evaluation_reasoning")) if payload.get("evaluation_reasoning") else None,
             missing_aspects=[str(item) for item in payload.get("missing_aspects", [])] if isinstance(payload.get("missing_aspects"), list) else None,
+            retry_target=payload.get("retry_target") if payload.get("retry_target") in {"answer", "analytical", "semantic"} else None,
+            retry_targets=[str(item) for item in payload.get("retry_targets", [])] if isinstance(payload.get("retry_targets"), list) else None,
             retry_count=int(payload.get("retry_count", 0)) if isinstance(payload.get("retry_count", 0), int) else 0,
+            evidence_retry_count=int(payload.get("evidence_retry_count", 0)) if isinstance(payload.get("evidence_retry_count", 0), int) else 0,
             hit_retry_cap=bool(payload.get("hit_retry_cap", False)),
         )
 

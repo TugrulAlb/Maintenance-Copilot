@@ -93,7 +93,10 @@ def generate_answer(state: dict[str, object]) -> dict[str, object]:
                         # retry from simply producing the same flawed answer again.
                         "previous_evaluation_reasoning": state.get("evaluation_reasoning"),
                         "previous_missing_aspects": state.get("missing_aspects", []),
+                        "retry_target": state.get("retry_target"),
+                        "retry_targets": state.get("retry_targets", []),
                         "retry_count": state.get("retry_count", 0),
+                        "evidence_retry_count": state.get("evidence_retry_count", 0),
                         "conversation_history": state.get("conversation_history", []),
                         "evidence": state.get("evidence", []),
                         "sql_rows": state.get("sql_rows", []),

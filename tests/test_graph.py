@@ -44,7 +44,7 @@ def test_graph_analytical_branch(monkeypatch) -> None:
         reasoning="test route",
         filters={"fault_category": "motor failure"},
     ))
-    monkeypatch.setattr(nodes, "run_sql_agent", lambda question, filters, conversation_history=None: {
+    monkeypatch.setattr(nodes, "run_sql_agent", lambda question, filters, conversation_history=None, **kwargs: {
         "sql_query": "SELECT * FROM maintenance_logs WHERE fault_category = 'motor failure'",
         "reasoning": "stubbed test query",
         "rows": [
@@ -94,7 +94,8 @@ def test_graph_analytical_branch(monkeypatch) -> None:
         "compose",
     ]
     assert result["is_sufficient"] is True
-    assert result["retry_count"] == 1
+    assert result["retry_count"] == 0
+    assert result["evidence_retry_count"] == 0
     assert result["citations"]
 
 
@@ -138,7 +139,7 @@ def test_graph_hybrid_branch_combines_sql_and_retrieval(monkeypatch) -> None:
     ))
     monkeypatch.setattr(nodes, "_make_hybrid_retriever", _FakeRetriever)
     monkeypatch.setattr(nodes, "_make_reranker", _FakeReranker)
-    monkeypatch.setattr(nodes, "run_sql_agent", lambda question, filters, conversation_history=None: {
+    monkeypatch.setattr(nodes, "run_sql_agent", lambda question, filters, conversation_history=None, **kwargs: {
         "sql_query": "SELECT production_line, COUNT(*) AS issue_count FROM maintenance_logs GROUP BY production_line LIMIT 10",
         "reasoning": "stubbed hybrid query",
         "rows": [
@@ -191,7 +192,7 @@ def test_answer_reflection_retries_with_targeted_feedback(monkeypatch) -> None:
         reasoning="test route",
         filters={"production_line": "Line 2"},
     ))
-    monkeypatch.setattr(nodes, "run_sql_agent", lambda question, filters, conversation_history=None: {
+    monkeypatch.setattr(nodes, "run_sql_agent", lambda question, filters, conversation_history=None, **kwargs: {
         "sql_query": "SELECT production_line, COUNT(*) AS issue_count FROM maintenance_logs WHERE production_line = 'Line 2' LIMIT 10",
         "reasoning": "stubbed query",
         "rows": [{"production_line": "Line 2", "issue_count": 4}],
@@ -203,8 +204,13 @@ def test_answer_reflection_retries_with_targeted_feedback(monkeypatch) -> None:
         {"answer": "Line 2 için 4 kayıt bulundu.", "citations": ["SQLite: maintenance_logs query -> SELECT production_line"]},
     ])
     evaluations = iter([
-        {"is_sufficient": False, "missing_aspects": ["include the issue count"], "reasoning": "The count is missing."},
-        {"is_sufficient": True, "missing_aspects": [], "reasoning": "The answer includes the count."},
+        {
+            "is_sufficient": False,
+            "missing_aspects": ["include the issue count"],
+            "reasoning": "The count is missing.",
+            "retry_target": "answer",
+        },
+        {"is_sufficient": True, "missing_aspects": [], "reasoning": "The answer includes the count.", "retry_target": None},
     ])
     seen_missing_aspects = []
 
@@ -223,7 +229,8 @@ def test_answer_reflection_retries_with_targeted_feedback(monkeypatch) -> None:
     )
 
     assert result["answer"] == "Line 2 için 4 kayıt bulundu."
-    assert result["retry_count"] == 2
+    assert result["retry_count"] == 1
+    assert result["evidence_retry_count"] == 0
     assert result["hit_retry_cap"] is False
     assert seen_missing_aspects == [[], ["include the issue count"]]
     assert result["node_trace"] == [
@@ -253,6 +260,7 @@ def test_answer_reflection_caps_retries_and_softens_answer(monkeypatch) -> None:
             "is_sufficient": False,
             "missing_aspects": ["cite the retrieved record"],
             "reasoning": "Citation is not specific enough.",
+            "retry_target": "answer",
         },
     )
 
@@ -264,6 +272,7 @@ def test_answer_reflection_caps_retries_and_softens_answer(monkeypatch) -> None:
     )
 
     assert result["retry_count"] == 2
+    assert result["evidence_retry_count"] == 0
     assert result["hit_retry_cap"] is True
     assert "kısmen eksik olabilir" in result["answer"]
     assert result["node_trace"] == [
@@ -273,5 +282,80 @@ def test_answer_reflection_caps_retries_and_softens_answer(monkeypatch) -> None:
         "evaluate_answer (insufficient: missing cite the retrieved record)",
         "answer (attempt 2)",
         "evaluate_answer (insufficient: missing cite the retrieved record)",
+        "answer (attempt 3)",
+        "evaluate_answer (insufficient: missing cite the retrieved record)",
+        "compose",
+    ]
+
+
+def test_evaluator_can_retry_semantic_evidence_with_wider_search(monkeypatch) -> None:
+    class TrackingRetriever:
+        def __init__(self) -> None:
+            self.calls: list[dict[str, object]] = []
+
+        def search(self, query: str, top_k_each: int = 15, filters: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+            self.calls.append({"top_k_each": top_k_each, "filters": filters})
+            return [
+                {
+                    "id": str(len(self.calls)),
+                    "document": "Line 2 motor failure retry evidence",
+                    "metadata": {"production_line": "Line 2", "fault_category": "motor failure"},
+                    "rrf_score": 0.04,
+                }
+            ]
+
+    class TrackingReranker:
+        def __init__(self) -> None:
+            self.top_k_values: list[int] = []
+
+        def rerank(self, query: str, candidates: list[dict[str, Any]], top_k: int = 5) -> list[dict[str, Any]]:
+            self.top_k_values.append(top_k)
+            return [dict(candidate, rerank_score=1.0) for candidate in candidates[:top_k]]
+
+    retriever = TrackingRetriever()
+    reranker = TrackingReranker()
+    evaluations = iter([
+        {
+            "is_sufficient": False,
+            "missing_aspects": ["retrieved chunks do not cover similar incidents"],
+            "reasoning": "Retrieval evidence is too narrow.",
+            "retry_target": "semantic",
+        },
+        {"is_sufficient": True, "missing_aspects": [], "reasoning": "Wider retrieval covers the question.", "retry_target": None},
+    ])
+
+    monkeypatch.setattr(nodes, "classify_question", lambda question, conversation_history=None: RouteDecision(
+        intent="semantic",
+        confidence=0.86,
+        reasoning="test route",
+        filters={"production_line": "Line 2"},
+    ))
+    monkeypatch.setattr(nodes, "_make_hybrid_retriever", lambda: retriever)
+    monkeypatch.setattr(nodes, "_make_reranker", lambda: reranker)
+    monkeypatch.setattr(nodes, "evaluate_draft_answer", lambda state: next(evaluations))
+
+    result = build_graph.get_graph_app().invoke(
+        {
+            "question": "Line 2'deki benzer motor failure kayıtlarını göster",
+            "thread_id": "semantic-evidence-retry",
+        }
+    )
+
+    assert result["retry_count"] == 0
+    assert result["evidence_retry_count"] == 1
+    assert result["hit_retry_cap"] is False
+    assert retriever.calls == [
+        {"top_k_each": 15, "filters": {"production_line": "Line 2"}},
+        {"top_k_each": 30, "filters": {"production_line": "Line 2"}},
+    ]
+    assert reranker.top_k_values == [5, 10]
+    assert result["node_trace"] == [
+        "classify",
+        "semantic",
+        "answer (attempt 1)",
+        "evaluate_answer (insufficient: missing retrieved chunks do not cover similar incidents)",
+        "semantic (evidence retry: widening search)",
+        "answer (attempt 2)",
+        "evaluate_answer (sufficient)",
         "compose",
     ]

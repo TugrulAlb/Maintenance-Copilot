@@ -46,7 +46,10 @@ def main() -> None:
         json.dumps(
             {
                 "is_sufficient": output.get("is_sufficient"),
-                "retry_count": output.get("retry_count", 0),
+                "answer_retry_count": output.get("retry_count", 0),
+                "evidence_retry_count": output.get("evidence_retry_count", 0),
+                "retry_target": output.get("retry_target"),
+                "retry_targets": output.get("retry_targets", []),
                 "hit_retry_cap": output.get("hit_retry_cap", False),
                 "missing_aspects": output.get("missing_aspects", []),
                 "evaluation_reasoning": output.get("evaluation_reasoning"),

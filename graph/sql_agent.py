@@ -117,7 +117,13 @@ def _execute_sql(sql_query: str, params: list[object] | None = None) -> list[dic
         connection.close()
 
 
-def run_sql_agent(question: str, filters: dict[str, Any], conversation_history: list[dict[str, object]] | None = None) -> dict[str, object]:
+def run_sql_agent(
+    question: str,
+    filters: dict[str, Any],
+    conversation_history: list[dict[str, object]] | None = None,
+    previous_sql_query: str | None = None,
+    evaluation_feedback: dict[str, object] | None = None,
+) -> dict[str, object]:
     """Generate and safely execute a SQL query for analytical questions."""
 
     client = _build_client()
@@ -144,6 +150,9 @@ def run_sql_agent(question: str, filters: dict[str, Any], conversation_history: 
                         f"Question: {question}\n"
                         f"Filters: {json.dumps(filters, ensure_ascii=False)}\n"
                         f"Conversation history: {json.dumps(conversation_history or [], ensure_ascii=False)}\n"
+                        f"Previous SQL query: {previous_sql_query or ''}\n"
+                        f"Evaluator feedback: {json.dumps(evaluation_feedback or {}, ensure_ascii=False)}\n"
+                        "If evaluator feedback says evidence was too narrow or incomplete, write a corrected or broader query. "
                         "Rules: SELECT only, no semicolons, target maintenance_logs, use aliases sparingly."
                     ),
                 },

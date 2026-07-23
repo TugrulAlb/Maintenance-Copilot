@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any, TypedDict
+from typing import Any, Literal, TypedDict
 
 
 class MaintenanceState(TypedDict, total=False):
@@ -19,7 +19,10 @@ class MaintenanceState(TypedDict, total=False):
     is_sufficient: bool | None
     evaluation_reasoning: str | None
     missing_aspects: list[str] | None
+    retry_target: Literal["answer", "analytical", "semantic"] | None
+    retry_targets: list[Literal["analytical", "semantic"]] | None
     retry_count: int
+    evidence_retry_count: int
     hit_retry_cap: bool
     conversation_history: list[dict[str, object]]
     sql_rows: list[dict[str, object]]

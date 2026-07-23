@@ -6,6 +6,7 @@ from langgraph.graph import END, START, StateGraph
 
 from graph.nodes import (
     MAX_ANSWER_RETRIES,
+    MAX_EVIDENCE_RETRIES,
     analytical_node,
     answer_node,
     classify_node,
@@ -24,14 +25,31 @@ def _route_node(state: MaintenanceState) -> str:
     return "hybrid"
 
 
-def _route_after_evaluation(state: MaintenanceState) -> str:
+def route_after_evaluation(state: MaintenanceState) -> str:
     if state.get("is_sufficient") is True:
         return "compose"
-    if int(state.get("retry_count", 0)) >= MAX_ANSWER_RETRIES:
-        # The cap guarantees graceful degradation: the graph surfaces a caveat
+
+    if state.get("hit_retry_cap"):
+        # The caps guarantee graceful degradation: the graph surfaces a caveat
         # in compose instead of looping forever or silently pretending certainty.
         return "compose"
-    return "answer"
+
+    retry_targets = state.get("retry_targets") or []
+    retry_target = state.get("retry_target")
+
+    if retry_targets and int(state.get("evidence_retry_count", 0)) <= MAX_EVIDENCE_RETRIES:
+        # Hybrid questions can legitimately need both SQL and retrieval evidence
+        # refreshed, so retry_targets is plural. Routing to hybrid re-runs both
+        # evidence paths with the evaluator feedback in state.
+        return "hybrid" if set(retry_targets) == {"analytical", "semantic"} else retry_targets[0]
+
+    if retry_target in {"analytical", "semantic"} and int(state.get("evidence_retry_count", 0)) <= MAX_EVIDENCE_RETRIES:
+        return retry_target
+
+    if retry_target == "answer" and int(state.get("retry_count", 0)) <= MAX_ANSWER_RETRIES:
+        return "answer"
+
+    return "compose"
 
 
 def _build_graph():
@@ -56,8 +74,8 @@ def _build_graph():
     graph.add_edge("answer", "evaluate_answer")
     graph.add_conditional_edges(
         "evaluate_answer",
-        _route_after_evaluation,
-        {"answer": "answer", "compose": "compose"},
+        route_after_evaluation,
+        {"answer": "answer", "analytical": "analytical", "semantic": "semantic", "hybrid": "hybrid", "compose": "compose"},
     )
     graph.add_edge("compose", END)
     return graph.compile()
