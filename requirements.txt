@@ -17,3 +17,5 @@ pytest==8.3.3
 ragas==0.2.6
 pandas==2.2.3
 datasets==3.1.0
+slowapi==0.1.9
+prometheus-client==0.21.0

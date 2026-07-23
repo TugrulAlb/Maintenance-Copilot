@@ -1,26 +1,31 @@
-"""FastAPI app for Maintenance Copilot."""
+"""FastAPI app for Maintenance Copilot.
 
-from __future__ import annotations
+Security posture: API-key auth, RBAC, rate limiting, and explicit CORS provide
+reasonable production hygiene for this portfolio-scale internal tool. A real
+Siemens-scale deployment would likely add OAuth2/OIDC through an enterprise
+identity provider, mTLS between services, and a proper API gateway in front of
+this service.
+"""
 
 import json
 import logging
 import os
 import time
-from collections import defaultdict
-from threading import Lock
 from typing import Any
 from uuid import uuid4
 
 from dotenv import load_dotenv
-from fastapi import Depends, FastAPI, HTTPException, Request
-from fastapi.responses import HTMLResponse, JSONResponse, Response
+from fastapi import Body, Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import HTMLResponse, JSONResponse, Response
+from slowapi.errors import RateLimitExceeded
 
-from api.auth import AccessContext, require_roles
+from api.auth import AccessContext, require_role
 from api.conversation_store import CONVERSATIONS
-from api.rate_limit import enforce_rate_limit
-from api.ui import render_index_html
+from api.metrics import record_graph_response, record_http_request, render_metrics
+from api.rate_limit import ask_rate_limit_rule, limiter
 from api.schemas import AnswerResponse, QuestionRequest
+from api.ui import render_index_html
 from graph.build_graph import get_graph_app
 
 
@@ -30,13 +35,13 @@ logger = logging.getLogger("maintenance_copilot.api")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
 app = FastAPI(title="Maintenance Copilot API", version="0.1.0")
+app.state.limiter = limiter
 
-_METRICS_LOCK = Lock()
-_REQUEST_COUNTS: dict[tuple[str, str, str, str], int] = defaultdict(int)
-_REQUEST_DURATION_MS_SUM: dict[tuple[str, str, str, str], float] = defaultdict(float)
-_REQUEST_DURATION_MS_COUNT: dict[tuple[str, str, str, str], int] = defaultdict(int)
 
 def _cors_origins() -> list[str]:
+    # Demo-stage wildcard CORS is convenient but unacceptable once API keys or
+    # credentials exist: a malicious origin could trick a browser into sending
+    # authenticated requests. Production CORS must be an explicit allow-list.
     origins = [
         origin.strip()
         for origin in os.getenv(
@@ -57,6 +62,15 @@ app.add_middleware(
     allow_methods=["GET", "POST", "OPTIONS"],
     allow_headers=["Content-Type", "Authorization", "X-API-Key", "X-Request-ID", "X-User-Role"],
 )
+
+
+@app.exception_handler(RateLimitExceeded)
+def rate_limit_exceeded_handler(_: Request, exc: RateLimitExceeded) -> JSONResponse:
+    return JSONResponse(
+        status_code=429,
+        content={"detail": "Rate limit exceeded"},
+        headers={"Retry-After": "60", "X-RateLimit-Limit": str(exc.limit.limit)},
+    )
 
 
 def _extract_response(payload: Any, fallback_thread_id: str, fallback_query_type: str) -> AnswerResponse:
@@ -103,36 +117,6 @@ def _extract_response(payload: Any, fallback_thread_id: str, fallback_query_type
     )
 
 
-def _record_request_metric(path: str, method: str, status_code: int, query_type: str, duration_ms: float) -> None:
-    """Record request metrics in memory for later /metrics scraping."""
-
-    key = (path, method, str(status_code), query_type)
-    with _METRICS_LOCK:
-        _REQUEST_COUNTS[key] += 1
-        _REQUEST_DURATION_MS_SUM[key] += duration_ms
-        _REQUEST_DURATION_MS_COUNT[key] += 1
-
-
-def _render_metrics() -> str:
-    """Render Prometheus-style metrics text without an extra dependency."""
-
-    lines = [
-        "# HELP maintenance_requests_total Total number of API requests.",
-        "# TYPE maintenance_requests_total counter",
-        "# HELP maintenance_request_duration_ms Average request duration in milliseconds.",
-        "# TYPE maintenance_request_duration_ms gauge",
-    ]
-    with _METRICS_LOCK:
-        for (path, method, status_code, query_type), count in sorted(_REQUEST_COUNTS.items()):
-            labels = f'path="{path}",method="{method}",status_code="{status_code}",query_type="{query_type}"'
-            avg = _REQUEST_DURATION_MS_SUM[(path, method, status_code, query_type)] / max(
-                1, _REQUEST_DURATION_MS_COUNT[(path, method, status_code, query_type)]
-            )
-            lines.append(f"maintenance_requests_total{{{labels}}} {count}")
-            lines.append(f"maintenance_request_duration_ms{{{labels}}} {avg:.3f}")
-    return "\n".join(lines) + "\n"
-
-
 @app.middleware("http")
 async def request_logging_middleware(request: Request, call_next):
     """Log request timing and query classification for observability.
@@ -148,18 +132,17 @@ async def request_logging_middleware(request: Request, call_next):
     query_type = "unknown"
     status_code = 500
     try:
-        enforce_rate_limit(request)
         response = await call_next(request)
         status_code = getattr(response, "status_code", 500)
     except HTTPException as exc:
         status_code = exc.status_code
         response = JSONResponse(status_code=exc.status_code, content={"detail": exc.detail}, headers=exc.headers)
-    duration_ms = (time.perf_counter() - start) * 1000
+    duration_seconds = time.perf_counter() - start
     question = getattr(request.state, "question", None)
     query_type = str(getattr(request.state, "query_type", None) or query_type)
     response.headers["X-Request-ID"] = request_id
 
-    _record_request_metric(request.url.path, request.method, status_code, query_type, duration_ms)
+    record_http_request(request.url.path, request.method, status_code, query_type, duration_seconds)
 
     logger.info(
         json.dumps(
@@ -169,7 +152,7 @@ async def request_logging_middleware(request: Request, call_next):
                 "path": request.url.path,
                 "method": request.method,
                 "status_code": status_code,
-                "duration_ms": round(duration_ms, 2),
+                "duration_ms": round(duration_seconds * 1000, 2),
                 "query_type": query_type,
                 "question": question,
             },
@@ -194,28 +177,29 @@ def index() -> str:
 
 
 @app.get("/metrics")
-def metrics(_: AccessContext = Depends(require_roles("admin"))) -> Response:
-    """Expose lightweight Prometheus-style metrics for scraping."""
+def metrics(_: AccessContext = Depends(require_role(["admin"]))) -> Response:
+    """Expose Prometheus-style metrics for scraping."""
 
-    return Response(content=_render_metrics(), media_type="text/plain; version=0.0.4")
+    return Response(content=render_metrics(), media_type="text/plain; version=0.0.4")
 
 
 @app.post("/ask", response_model=AnswerResponse)
+@limiter.limit(ask_rate_limit_rule)
 def ask(
-    http_request: Request,
-    request: QuestionRequest,
-    _: AccessContext = Depends(require_roles("user", "admin")),
+    request: Request,
+    question_request: QuestionRequest = Body(...),
+    _: AccessContext = Depends(require_role(["viewer", "admin"], allow_public=True)),
 ) -> AnswerResponse:
     """Invoke the compiled LangGraph app and return the assistant answer."""
 
-    thread_id = request.thread_id or str(uuid4())
-    http_request.state.question = request.question
+    thread_id = question_request.thread_id or str(uuid4())
+    request.state.question = question_request.question
     conversation_history = CONVERSATIONS.get_history(thread_id)
 
     graph_app = get_graph_app()
     result = graph_app.invoke(
         {
-            "question": request.question,
+            "question": question_request.question,
             "thread_id": thread_id,
             "conversation_history": conversation_history,
         },
@@ -223,8 +207,9 @@ def ask(
     )
 
     response = _extract_response(result, fallback_thread_id=thread_id, fallback_query_type="hybrid")
-    http_request.state.query_type = response.query_type
-    CONVERSATIONS.append_turn(thread_id, request.question, response.answer, response.query_type, response.citations)
+    request.state.query_type = response.query_type
+    record_graph_response(response)
+    CONVERSATIONS.append_turn(thread_id, question_request.question, response.answer, response.query_type, response.citations)
     return response
 
 

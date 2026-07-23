@@ -31,10 +31,14 @@ def test_index_ui_endpoint() -> None:
     assert "Maintenance Copilot" in response.text
 
 
-def test_metrics_endpoint_exists() -> None:
-    response = client.get("/metrics")
+def test_metrics_endpoint_returns_prometheus_text(monkeypatch) -> None:
+    monkeypatch.setenv("MAINTENANCE_COPILOT_API_KEYS", "admin-key")
+    monkeypatch.setenv("MAINTENANCE_COPILOT_API_KEY_ROLES", "admin-key:admin")
+
+    response = client.get("/metrics", headers={"X-API-Key": "admin-key"})
     assert response.status_code == 200
     assert "maintenance_requests_total" in response.text
+    assert "# HELP" in response.text
 
 
 @patch("api.main.get_graph_app")
@@ -113,6 +117,13 @@ def test_authentication_and_authorization(mock_get_graph_app: MagicMock, monkeyp
 
     no_key_response = client.post("/ask", json={"question": "Motor failure on Line 1?"})
     assert no_key_response.status_code == 401
+
+    invalid_key_response = client.post(
+        "/ask",
+        json={"question": "Motor failure on Line 1?"},
+        headers={"X-API-Key": "bad-key"},
+    )
+    assert invalid_key_response.status_code == 401
 
     user_response = client.post(
         "/ask",

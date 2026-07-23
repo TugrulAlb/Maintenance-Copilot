@@ -107,6 +107,12 @@ Health check:
 curl http://127.0.0.1:8000/health
 ```
 
+Open the plain demo UI in a browser:
+
+```text
+http://127.0.0.1:8000/
+```
+
 Ask a question:
 
 ```bash
@@ -120,7 +126,8 @@ Ask with API-key auth enabled:
 ```bash
 MAINTENANCE_COPILOT_ALLOW_PUBLIC=false \
 MAINTENANCE_COPILOT_API_KEYS=demo-user-key,demo-admin-key \
-MAINTENANCE_COPILOT_ADMIN_KEYS=demo-admin-key \
+MAINTENANCE_COPILOT_API_KEY_ROLES=demo-user-key:viewer,demo-admin-key:admin \
+MAINTENANCE_COPILOT_RATE_LIMIT_PER_MINUTE=20 \
 uvicorn api.main:app --reload
 ```
 
@@ -131,7 +138,10 @@ curl -X POST http://127.0.0.1:8000/ask \
 	-d '{"question":"Line 2 motor failure trendini ve benzer kayıtları özetle"}'
 ```
 
-Metrics require an admin key when auth is enabled:
+API keys are sent with the `X-API-Key` header. The `/ask` endpoint allows
+`viewer` and `admin` roles; `/metrics` is admin-only.
+
+Metrics require an admin key:
 
 ```bash
 curl -H "X-API-Key: demo-admin-key" http://127.0.0.1:8000/metrics
@@ -232,5 +242,6 @@ Placeholder result table:
 ## Production notes
 
 - Set `MAINTENANCE_COPILOT_ALLOW_PUBLIC=false` and configure `MAINTENANCE_COPILOT_API_KEYS`.
+- Map keys to roles with `MAINTENANCE_COPILOT_API_KEY_ROLES`, for example `viewer-key:viewer,admin-key:admin`.
 - Set `MAINTENANCE_COPILOT_CORS_ORIGINS` to explicit frontend origins. `*` is rejected at startup.
-- Keep `/metrics` behind an admin key and scrape it from your monitoring stack.
+- Keep `/metrics` behind an admin key and scrape it from Prometheus, then build Grafana panels for latency, request volume, graph node visits, guardrail blocks, and retry counts.
