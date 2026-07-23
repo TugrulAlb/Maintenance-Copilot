@@ -14,10 +14,12 @@ Maintenance Copilot is a portfolio project for semantic and analytical question 
 
 ## Routing architecture
 
-The LangGraph workflow starts with a structured LLM router. It returns an
-`intent` (`analytical`, `semantic`, or `hybrid`), confidence, a short reasoning
-string, and safe metadata filters such as `production_line`, `fault_category`,
-`machine_id`, and `severity`.
+The LangGraph workflow starts with an `input_guardrail` node. If the question is
+clearly off-topic or looks like prompt injection, the graph routes directly to
+`compose` with a safe refusal. Otherwise it continues to a structured LLM router.
+The router returns an `intent` (`analytical`, `semantic`, or `hybrid`),
+confidence, a short reasoning string, and safe metadata filters such as
+`production_line`, `fault_category`, `machine_id`, and `severity`.
 
 - `analytical` questions go to the NL2SQL agent over `maintenance_logs`.
 - `semantic` questions go to hybrid retrieval: dense vector search plus BM25,
@@ -38,6 +40,37 @@ node returns the best available answer with a soft caveat.
 
 When no model credentials are configured, the router falls back to a deterministic
 local classifier with the same output shape so tests and local demos still run.
+
+## Guardrails
+
+The guardrails are intentionally lightweight and implemented in `graph/guardrails.py`
+instead of using a heavy external framework. The structure still follows the same
+pattern used by production guardrail systems: input rails protect the graph before
+work starts, and output rails protect the response before it leaves the API.
+
+Input guardrails:
+
+- Off-topic detection blocks questions outside industrial maintenance, such as
+  creative writing or general trivia requests.
+- Prompt injection detection blocks attempts like "ignore previous instructions"
+  or requests to reveal hidden prompts.
+- Blocking happens in the first LangGraph node. This saves cost because an
+  invalid request does not run classification, retrieval, SQL generation, answer
+  generation, or evaluation.
+
+Output guardrails:
+
+- Regex-based PII redaction removes obvious emails, phone numbers, and personal
+  ID-like values if they accidentally appear in the final answer.
+- Empty or low-confidence answers are converted into a clear fallback such as
+  "I do not have enough information to answer confidently" instead of returning
+  a made-up-sounding response.
+- The compose path always returns the API shape expected by `AnswerResponse`,
+  including refusal/error paths.
+
+In a larger production system this maps cleanly to frameworks such as NeMo
+Guardrails or Guardrails AI. Those tools formalize the same input/output rail
+concept with more configuration, policies, and runtime integrations.
 
 ## Synthetic data generation
 
@@ -152,6 +185,49 @@ Run the graph evaluation cases:
 ```bash
 python evaluation/run_eval.py
 ```
+
+Run the RAGAS evaluation pipeline:
+
+```bash
+python eval/run_ragas_eval.py
+```
+
+The RAGAS runner executes the full LangGraph workflow for curated analytical,
+semantic, and hybrid questions, then saves a per-question table to
+`eval/results.csv`.
+
+Before running it, generate data and build retrieval indexes:
+
+```bash
+python data/generate_synthetic_data.py --records 500
+python ingestion/run_ingestion.py
+```
+
+The runner can build the BM25 index from SQLite if it is missing, but ChromaDB
+requires ingestion because embeddings must be generated first.
+
+Metrics:
+
+- `faithfulness`: checks whether the final answer is supported by the retrieved
+  context or SQL evidence. This is reference-free: it only needs the question,
+  answer, and evidence.
+- `answer_relevancy`: checks whether the answer actually addresses the user's
+  question. This is also reference-free.
+- `context_precision`: checks whether retrieved contexts are relevant and ranked
+  usefully for semantic/hybrid questions.
+- `context_recall`: checks whether the retriever found the contexts that should
+  have been found. This needs a ground-truth reference context, usually curated
+  record ids, because recall requires knowing what the system was supposed to
+  retrieve.
+- `hallucination_flag_rate`: custom LLM-as-judge metric that reports the share
+  of answers containing claims not present in the evidence. It is simpler than
+  RAGAS faithfulness and easier to explain in an interview.
+
+Placeholder result table:
+
+| Run date | Faithfulness | Answer relevancy | Context precision | Context recall | Hallucination flag rate |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| TODO | TODO | TODO | TODO | TODO | TODO |
 
 ## Production notes
 

@@ -9,6 +9,7 @@ from typing import Any
 
 from graph.answering import generate_answer
 from graph.classifier import classify_question, extract_filters_fallback
+from graph.guardrails import apply_output_guardrails, evaluate_input_guardrails
 from graph.llm_client import build_chat_client, chat_model
 from graph.sql_agent import run_sql_agent
 from graph.state import MaintenanceState
@@ -89,6 +90,26 @@ def load_rows() -> list[sqlite3.Row]:
         return cursor.fetchall()
     finally:
         connection.close()
+
+
+def input_guardrail_node(state: MaintenanceState) -> MaintenanceState:
+    state = _append_trace(state, "input_guardrail")
+    result = evaluate_input_guardrails(state["question"])
+    state["input_blocked"] = result.blocked
+    state["block_reason"] = result.reason
+    if result.blocked:
+        state["answer"] = result.safe_response or "Bu isteği güvenli şekilde işleyemem."
+        state["query_type"] = "blocked"
+        state["filters"] = {}
+        state["citations"] = []
+        state["is_sufficient"] = False
+        state["router_confidence"] = None
+        state["router_reasoning"] = result.reason
+        state["missing_aspects"] = [result.reason] if result.reason else []
+        state["retry_count"] = int(state.get("retry_count", 0))
+        state["evidence_retry_count"] = int(state.get("evidence_retry_count", 0))
+        state["hit_retry_cap"] = False
+    return state
 
 
 def classify_node(state: MaintenanceState) -> MaintenanceState:
@@ -384,14 +405,15 @@ def evaluate_answer_node(state: MaintenanceState) -> MaintenanceState:
 
 def compose_node(state: MaintenanceState) -> MaintenanceState:
     state = _append_trace(state, "compose")
-    if not state.get("answer"):
-        state["answer"] = "Soru işlendi ama yanıt üretilemedi."
-    if state.get("hit_retry_cap"):
-        reasoning = state.get("evaluation_reasoning") or "Evaluator was not fully satisfied after retries."
-        state["answer"] = (
-            "Not: Bu cevap otomatik değerlendirme döngüsünde tam yeterli bulunmadı; "
-            f"kısmen eksik olabilir. Değerlendirme: {reasoning}\n\n{state['answer']}"
-        )
+    guarded = apply_output_guardrails(
+        str(state.get("answer", "")),
+        is_sufficient=state.get("is_sufficient"),
+        hit_retry_cap=bool(state.get("hit_retry_cap", False)),
+        evaluation_reasoning=state.get("evaluation_reasoning"),
+        input_blocked=bool(state.get("input_blocked", False)),
+    )
+    state["answer"] = guarded.answer
+    state["output_redactions"] = guarded.redactions
     if not state.get("citations"):
         state["citations"] = []
     return state

@@ -23,6 +23,8 @@ class AnswerResponse(BaseModel):
     node_trace: list[str]
     citations: list[str] = Field(default_factory=list)
     filters: dict[str, Any] = Field(default_factory=dict)
+    input_blocked: bool = False
+    block_reason: str | None = None
     router_confidence: float | None = None
     router_reasoning: str | None = None
     is_sufficient: bool | None = None
@@ -33,3 +35,4 @@ class AnswerResponse(BaseModel):
     retry_count: int = 0
     evidence_retry_count: int = 0
     hit_retry_cap: bool = False
+    output_redactions: list[str] = Field(default_factory=list)

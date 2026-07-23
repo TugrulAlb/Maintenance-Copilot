@@ -16,6 +16,8 @@ class MaintenanceState(TypedDict, total=False):
     answer: str
     node_trace: list[str]
     filters: dict[str, Any]
+    input_blocked: bool
+    block_reason: str | None
     is_sufficient: bool | None
     evaluation_reasoning: str | None
     missing_aspects: list[str] | None
@@ -31,3 +33,4 @@ class MaintenanceState(TypedDict, total=False):
     candidates: list[dict[str, object]]
     results: list[dict[str, object]]
     citations: list[str]
+    output_redactions: list[str]

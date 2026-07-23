@@ -79,6 +79,8 @@ def _extract_response(payload: Any, fallback_thread_id: str, fallback_query_type
             node_trace=[str(node) for node in node_trace],
             citations=[str(item) for item in payload.get("citations", [])] if isinstance(payload.get("citations", []), list) else [],
             filters=filters,
+            input_blocked=bool(payload.get("input_blocked", False)),
+            block_reason=str(payload.get("block_reason")) if payload.get("block_reason") else None,
             router_confidence=payload.get("router_confidence") if isinstance(payload.get("router_confidence"), (float, int)) else None,
             router_reasoning=str(payload.get("router_reasoning")) if payload.get("router_reasoning") else None,
             is_sufficient=payload.get("is_sufficient") if isinstance(payload.get("is_sufficient"), bool) else None,
@@ -89,6 +91,7 @@ def _extract_response(payload: Any, fallback_thread_id: str, fallback_query_type
             retry_count=int(payload.get("retry_count", 0)) if isinstance(payload.get("retry_count", 0), int) else 0,
             evidence_retry_count=int(payload.get("evidence_retry_count", 0)) if isinstance(payload.get("evidence_retry_count", 0), int) else 0,
             hit_retry_cap=bool(payload.get("hit_retry_cap", False)),
+            output_redactions=[str(item) for item in payload.get("output_redactions", [])] if isinstance(payload.get("output_redactions", []), list) else [],
         )
 
     return AnswerResponse(

@@ -87,6 +87,7 @@ def test_graph_analytical_branch(monkeypatch) -> None:
     assert result["router_confidence"] == 0.91
     assert "Line 1" in result["answer"] and "Line 2" in result["answer"]
     assert result["node_trace"] == [
+        "input_guardrail",
         "classify",
         "analytical",
         "answer (attempt 1)",
@@ -121,6 +122,7 @@ def test_graph_semantic_branch(monkeypatch) -> None:
     assert result["query_type"] == "semantic"
     assert "Line 2" in result["answer"]
     assert result["node_trace"] == [
+        "input_guardrail",
         "classify",
         "semantic",
         "answer (attempt 1)",
@@ -163,6 +165,7 @@ def test_graph_hybrid_branch_combines_sql_and_retrieval(monkeypatch) -> None:
     assert "Analytical sonuç" in result["answer"]
     assert "Semantic olarak" in result["answer"]
     assert result["node_trace"] == [
+        "input_guardrail",
         "classify",
         "hybrid",
         "analytical",
@@ -234,6 +237,7 @@ def test_answer_reflection_retries_with_targeted_feedback(monkeypatch) -> None:
     assert result["hit_retry_cap"] is False
     assert seen_missing_aspects == [[], ["include the issue count"]]
     assert result["node_trace"] == [
+        "input_guardrail",
         "classify",
         "analytical",
         "answer (attempt 1)",
@@ -276,6 +280,7 @@ def test_answer_reflection_caps_retries_and_softens_answer(monkeypatch) -> None:
     assert result["hit_retry_cap"] is True
     assert "kısmen eksik olabilir" in result["answer"]
     assert result["node_trace"] == [
+        "input_guardrail",
         "classify",
         "semantic",
         "answer (attempt 1)",
@@ -350,6 +355,7 @@ def test_evaluator_can_retry_semantic_evidence_with_wider_search(monkeypatch) ->
     ]
     assert reranker.top_k_values == [5, 10]
     assert result["node_trace"] == [
+        "input_guardrail",
         "classify",
         "semantic",
         "answer (attempt 1)",

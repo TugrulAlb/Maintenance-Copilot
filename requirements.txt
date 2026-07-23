@@ -2,6 +2,10 @@ fastapi==0.115.0
 uvicorn==0.30.6
 langgraph==0.2.35
 langchain-core==0.3.21
+langchain==0.3.9
+langchain-community==0.3.9
+langchain-openai==0.2.2
+langchain-text-splitters==0.3.2
 chromadb==0.5.11
 rank-bm25==0.2.2
 sentence-transformers==3.0.1
@@ -10,3 +14,6 @@ sqlalchemy==2.0.34
 pydantic==2.9.2
 python-dotenv==1.0.1
 pytest==8.3.3
+ragas==0.2.6
+pandas==2.2.3
+datasets==3.1.0

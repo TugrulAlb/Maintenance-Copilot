@@ -13,6 +13,7 @@ from graph.nodes import (
     compose_node,
     evaluate_answer_node,
     hybrid_node,
+    input_guardrail_node,
     semantic_node,
 )
 from graph.state import MaintenanceState
@@ -23,6 +24,12 @@ def _route_node(state: MaintenanceState) -> str:
     if query_type in {"analytical", "semantic", "hybrid"}:
         return query_type
     return "hybrid"
+
+
+def route_after_input_guardrail(state: MaintenanceState) -> str:
+    if state.get("input_blocked"):
+        return "compose"
+    return "classify"
 
 
 def route_after_evaluation(state: MaintenanceState) -> str:
@@ -54,6 +61,7 @@ def route_after_evaluation(state: MaintenanceState) -> str:
 
 def _build_graph():
     graph = StateGraph(MaintenanceState)
+    graph.add_node("input_guardrail", input_guardrail_node)
     graph.add_node("classify", classify_node)
     graph.add_node("analytical", analytical_node)
     graph.add_node("semantic", semantic_node)
@@ -62,7 +70,12 @@ def _build_graph():
     graph.add_node("evaluate_answer", evaluate_answer_node)
     graph.add_node("compose", compose_node)
 
-    graph.add_edge(START, "classify")
+    graph.add_edge(START, "input_guardrail")
+    graph.add_conditional_edges(
+        "input_guardrail",
+        route_after_input_guardrail,
+        {"classify": "classify", "compose": "compose"},
+    )
     graph.add_conditional_edges(
         "classify",
         _route_node,
