@@ -58,6 +58,7 @@ def _allow_public_demo_mode() -> bool:
 def verify_api_key(
     request: Request,
     x_api_key: str | None = Header(default=None, alias="X-API-Key"),
+    authorization: str | None = Header(default=None, alias="Authorization"),
 ) -> AccessContext:
     """Authenticate requests via a deliberately simple API-key scheme.
 
@@ -69,19 +70,24 @@ def verify_api_key(
 
     key_roles = _configured_key_roles()
 
+    bearer_key = None
+    if authorization and authorization.lower().startswith("bearer "):
+        bearer_key = authorization.split(" ", 1)[1].strip()
+    supplied_key = x_api_key or bearer_key
+
     if not key_roles and _allow_public_demo_mode():
-        return AccessContext(api_key=x_api_key, role="public", is_authenticated=False)
+        return AccessContext(api_key=supplied_key, role="public", is_authenticated=False)
 
     if not key_roles:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="API keys are required")
 
-    if not x_api_key or x_api_key not in key_roles:
+    if not supplied_key or supplied_key not in key_roles:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or missing API key")
 
-    role = key_roles[x_api_key]
-    request.state.api_key = x_api_key
+    role = key_roles[supplied_key]
+    request.state.api_key = supplied_key
     request.state.role = role
-    return AccessContext(api_key=x_api_key, role=role, is_authenticated=True)
+    return AccessContext(api_key=supplied_key, role=role, is_authenticated=True)
 
 
 get_access_context = verify_api_key

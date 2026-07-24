@@ -10,7 +10,7 @@ Maintenance Copilot is a portfolio project for semantic and analytical question 
 - `graph/` contains the compiled LangGraph workflow with analytical, semantic, and hybrid branches.
 - `api/` exposes the browser UI, API-key auth, role checks, rate limiting, CORS, and metrics.
 - `evaluation/` runs regression checks for routing, graph nodes, citations, and answer content.
-- `docker/`, `k8s/`, and `.github/workflows/` are reserved for deployment assets.
+- `docker/` and `k8s/` contain container and Kubernetes deployment assets.
 
 ## Routing architecture
 
@@ -182,12 +182,103 @@ docker compose exec api python ingestion/run_ingestion.py
 
 Once the container is healthy, the API is available at `http://127.0.0.1:8000`.
 
-## Evaluation and tests
+## Monitoring
 
-Run the automated tests:
+The Docker stack includes Prometheus, Loki, Promtail, and Grafana for local
+observability demos:
 
 ```bash
-pytest -q
+cd docker
+docker compose up --build
+```
+
+Open Grafana at:
+
+```text
+http://localhost:3000
+```
+
+Local demo credentials are `admin` / `admin`. Change these credentials in any
+real deployment. Prometheus is available at `http://localhost:9090` and scrapes
+the FastAPI `/metrics` endpoint every 15 seconds.
+
+Logs are centralized with Loki:
+
+- `promtail` tails Docker container logs.
+- `loki` stores and indexes the log streams.
+- Grafana has an auto-provisioned Loki datasource and an `API Logs` panel in the
+  Maintenance Copilot dashboard.
+
+To inspect logs directly in Grafana, open **Explore**, select **Loki**, and run:
+
+```logql
+{compose_project="docker", service="api"}
+```
+
+The plain Docker fallback is still useful during debugging:
+
+```bash
+docker compose -f docker/docker-compose.yml logs -f api
+```
+
+After running a few `/ask` queries, take a screenshot of the Grafana dashboard
+for the interview/portfolio README or presentation.
+
+Observability has three common layers: metrics, logs, and traces. This project
+implements metrics through Prometheus-compatible counters/histograms and
+centralized logs through Promtail + Loki + Grafana. Distributed tracing is noted
+as future work; in a larger deployment this would usually be added with
+OpenTelemetry and exported to a tracing backend such as Jaeger, Tempo, or a
+managed cloud service.
+
+## Run on Kubernetes
+
+The `k8s/` folder contains a small production-shaped deployment:
+
+- `namespace.yaml`
+- `configmap.yaml`
+- `secret.example.yaml`
+- `pvc.yaml`
+- `deployment.yaml`
+- `service.yaml`
+- `ingress.yaml`
+- `kustomization.yaml`
+
+Build and push an image, then point the kustomization image to your registry:
+
+```bash
+docker build -f docker/Dockerfile -t your-registry/maintenance-copilot:latest .
+kubectl kustomize k8s
+```
+
+Create the real secret outside git:
+
+```bash
+kubectl apply -f k8s/namespace.yaml
+kubectl -n maintenance-copilot create secret generic maintenance-copilot-secrets \
+  --from-literal=AZURE_OPENAI_API_KEY=your-key \
+  --from-literal=MAINTENANCE_COPILOT_API_KEYS=viewer-key,admin-key \
+  --from-literal=MAINTENANCE_COPILOT_ADMIN_KEYS=admin-key
+```
+
+Then deploy:
+
+```bash
+kubectl apply -k k8s
+```
+
+The deployment mounts persistent volumes at `/app/data` and `/app/chroma_data`
+so the SQLite database and Chroma index can survive pod restarts. Update
+`k8s/configmap.yaml` and `k8s/ingress.yaml` before production use, especially
+`MAINTENANCE_COPILOT_CORS_ORIGINS`, Azure OpenAI deployment names, and the
+public host name.
+
+## Evaluation and smoke check
+
+Run a quick import check before pushing:
+
+```bash
+python -c "from api.main import app; print(app.title)"
 ```
 
 Run the graph evaluation cases:

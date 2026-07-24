@@ -9,6 +9,7 @@ and tests still work offline.
 from __future__ import annotations
 
 import json
+import logging
 import re
 from dataclasses import dataclass, field
 from functools import lru_cache
@@ -21,6 +22,8 @@ from graph.llm_client import build_chat_client, chat_model
 
 
 load_dotenv()
+
+logger = logging.getLogger("maintenance_copilot.classifier")
 
 
 VALID_INTENTS = {"analytical", "semantic", "hybrid"}
@@ -102,9 +105,9 @@ def extract_filters_fallback(question: str) -> dict[str, Any]:
     return filters
 
 
-def _heuristic_classify(question: str) -> RouteDecision:
+def _heuristic_classify(question: str, fallback_reason: str | None = None) -> RouteDecision:
     lowered = question.lower().strip()
-    analytical_keywords = ["kaç", "how many", "trend", "ortalama", "rate", "en çok", "distribution", "count", "which"]
+    analytical_keywords = ["kaç", "how many", "toplam", "trend", "ortalama", "average", "rate", "en çok", "distribution", "count", "which"]
     semantic_keywords = ["neden", "why", "ne oldu", "what happened", "arıza", "fault", "error", "sensör", "sensor", "benzer", "similar"]
     strong_semantic_keywords = ["neden", "why", "ne oldu", "what happened", "benzer", "similar", "açıkla", "explain"]
     has_analytical = any(keyword in lowered for keyword in analytical_keywords)
@@ -112,13 +115,17 @@ def _heuristic_classify(question: str) -> RouteDecision:
     has_strong_semantic = any(keyword in lowered for keyword in strong_semantic_keywords)
     filters = extract_filters_fallback(question)
 
+    prefix = f"Fallback reason: {fallback_reason}. " if fallback_reason else ""
+    if fallback_reason:
+        logger.info("Router fallback triggered: %s", fallback_reason)
+
     if has_analytical and has_strong_semantic:
-        return RouteDecision("hybrid", 0.65, "Fallback matched analytical and semantic cues.", filters)
+        return RouteDecision("hybrid", 0.65, f"{prefix}Fallback matched analytical and semantic cues.", filters)
     if has_analytical:
-        return RouteDecision("analytical", 0.7, "Fallback matched aggregation or trend cues.", filters)
+        return RouteDecision("analytical", 0.7, f"{prefix}Fallback matched aggregation or trend cues.", filters)
     if has_semantic:
-        return RouteDecision("semantic", 0.7, "Fallback matched fault or similarity cues.", filters)
-    return RouteDecision("hybrid", 0.45, "Fallback defaulted to hybrid for an ambiguous question.", filters)
+        return RouteDecision("semantic", 0.7, f"{prefix}Fallback matched fault or similarity cues.", filters)
+    return RouteDecision("hybrid", 0.45, f"{prefix}Fallback defaulted to hybrid for an ambiguous question.", filters)
 
 
 @lru_cache(maxsize=1)
@@ -164,7 +171,7 @@ def _sanitize_filters(raw_filters: object) -> dict[str, Any]:
 def _route_from_payload(payload: dict[str, object], question: str) -> RouteDecision:
     intent = str(payload.get("intent", "")).strip().lower()
     if intent not in VALID_INTENTS:
-        return _heuristic_classify(question)
+        return _heuristic_classify(question, f"invalid LLM intent {intent or '<empty>'}")
 
     llm_filters = _sanitize_filters(payload.get("filters", {}))
     fallback_filters = extract_filters_fallback(question)
@@ -183,7 +190,7 @@ def classify_question(question: str, conversation_history: list[dict[str, object
 
     client = _build_client()
     if client is None:
-        return _heuristic_classify(question)
+        return _heuristic_classify(question, "no chat model credentials/client configured")
 
     model = chat_model("AZURE_OPENAI_CLASSIFIER_DEPLOYMENT_NAME", "OPENAI_CLASSIFIER_MODEL")
 
@@ -235,17 +242,17 @@ def classify_question(question: str, conversation_history: list[dict[str, object
                 },
             ],
         )
-    except Exception:
-        return _heuristic_classify(question)
+    except Exception as exc:
+        return _heuristic_classify(question, f"LLM router call failed: {type(exc).__name__}: {exc}")
 
     raw_text = response.choices[0].message.content or "{}"
     try:
         payload = json.loads(raw_text)
-    except json.JSONDecodeError:
-        return _heuristic_classify(question)
+    except json.JSONDecodeError as exc:
+        return _heuristic_classify(question, f"malformed LLM JSON: {exc}")
 
     if not isinstance(payload, dict):
-        return _heuristic_classify(question)
+        return _heuristic_classify(question, f"LLM JSON was {type(payload).__name__}, expected object")
     return _route_from_payload(payload, question)
 
 

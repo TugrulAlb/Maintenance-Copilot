@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 from pathlib import Path
 from typing import Any
@@ -11,7 +12,7 @@ from graph.answering import generate_answer
 from graph.classifier import classify_question, extract_filters_fallback
 from graph.guardrails import apply_output_guardrails, evaluate_input_guardrails
 from graph.llm_client import build_chat_client, chat_model
-from graph.sql_agent import run_sql_agent
+from graph.sql_agent import question_requires_aggregate, run_sql_agent, sql_uses_aggregate
 from graph.state import MaintenanceState
 
 
@@ -92,6 +93,116 @@ def load_rows() -> list[sqlite3.Row]:
         connection.close()
 
 
+def _tokenize_for_fallback(text: str) -> set[str]:
+    """Tiny lexical tokenizer used only when the vector stack is unavailable."""
+
+    stopwords = {
+        "a",
+        "an",
+        "and",
+        "about",
+        "the",
+        "for",
+        "find",
+        "show",
+        "me",
+        "incidents",
+        "incident",
+        "maintenance",
+        "kaydi",
+        "kaydı",
+        "olan",
+        "ile",
+        "ilgili",
+    }
+    tokens = {token for token in re.split(r"[^a-z0-9ğüşöçıİĞÜŞÖÇ]+", text.lower()) if token and token not in stopwords}
+    synonyms = {
+        "kayış": {"belt"},
+        "kayis": {"belt"},
+        "hizalama": {"alignment", "tracking"},
+        "hizalaması": {"alignment", "tracking"},
+        "hizalamasi": {"alignment", "tracking"},
+        "kaydı": {"drifted"},
+        "kaydi": {"drifted"},
+        "kaydıği": {"drifted"},
+        "kaydığı": {"drifted"},
+        "kaydigi": {"drifted"},
+        "sola": {"left"},
+        "gerginlik": {"tension"},
+        "ayar": {"adjustment"},
+        "ayarı": {"adjustment"},
+        "ayari": {"adjustment"},
+        "gereken": {"required"},
+        "gerektiren": {"required"},
+        "motor": {"motor"},
+        "akım": {"current"},
+        "akim": {"current"},
+        "anormal": {"abnormal"},
+        "durma": {"stall"},
+        "sıkışma": {"stall"},
+        "sicaklik": {"temperature"},
+        "sıcaklık": {"temperature"},
+        "sensör": {"sensor"},
+        "sensor": {"sensor"},
+    }
+    expanded = set(tokens)
+    for token in tokens:
+        expanded.update(synonyms.get(token, set()))
+    return expanded
+
+
+def _fallback_semantic_retrieval(question: str, filters: dict[str, Any], top_k: int = 5) -> list[dict[str, Any]]:
+    """Return approximate semantic evidence from SQLite when Chroma is not available.
+
+    This keeps the demo path useful in lightweight Docker images. It is not a
+    replacement for the real dense+BM25 retriever; it is a graceful fallback that
+    scores overlap against the same chunk text the vector index would contain.
+    """
+
+    query_tokens = _tokenize_for_fallback(question)
+    if not query_tokens:
+        return []
+
+    scored: list[tuple[float, dict[str, Any]]] = []
+    for row in load_rows():
+        metadata = {
+            "production_line": row["production_line"],
+            "machine_id": row["machine_id"],
+            "fault_category": row["fault_category"],
+            "severity": row["severity"],
+            "timestamp": row["timestamp"],
+        }
+        if filters and any(not isinstance(value, dict) and metadata.get(key) != value for key, value in filters.items()):
+            continue
+
+        document = (
+            f"Record #{row['id']} | {row['timestamp']} | {row['production_line']} | "
+            f"{row['machine_id']} | {row['fault_category']} | {row['severity']} | "
+            f"{row['description']} | resolution_time_minutes={row['resolution_time_minutes']}"
+        )
+        doc_tokens = _tokenize_for_fallback(document)
+        overlap = query_tokens & doc_tokens
+        if not overlap:
+            continue
+        score = len(overlap) / max(1, len(query_tokens))
+        scored.append(
+            (
+                score,
+                {
+                    "id": str(row["id"]),
+                    "document": document,
+                    "metadata": metadata,
+                    "rrf_score": score,
+                    "rerank_score": score,
+                    "sources": [{"rank": 1, "score": score, "source": "sqlite_lexical_fallback"}],
+                },
+            )
+        )
+
+    scored.sort(key=lambda item: item[0], reverse=True)
+    return [item for _, item in scored[:top_k]]
+
+
 def input_guardrail_node(state: MaintenanceState) -> MaintenanceState:
     state = _append_trace(state, "input_guardrail")
     result = evaluate_input_guardrails(state["question"])
@@ -149,6 +260,8 @@ def analytical_node(state: MaintenanceState) -> MaintenanceState:
     rows = sql_result["rows"]
     state["sql_rows"] = rows
     state["sql_query"] = str(sql_result["sql_query"])
+    state["sql_generation_issue"] = bool(sql_result.get("sql_generation_issue", False))
+    state["aggregate_required"] = bool(sql_result.get("aggregate_required", False))
     sql_citations = list(sql_result.get("citations", []))
     if is_retry:
         state["citations"] = [item for item in state.get("citations", []) if not str(item).startswith("SQLite:")] + sql_citations
@@ -160,6 +273,8 @@ def analytical_node(state: MaintenanceState) -> MaintenanceState:
         "sql_query": sql_result["sql_query"],
         "rows": rows,
         "reasoning": sql_result.get("reasoning", ""),
+        "aggregate_required": sql_result.get("aggregate_required", False),
+        "sql_generation_issue": sql_result.get("sql_generation_issue", False),
     }
     state["evidence"] = _replace_evidence(state, "sql", sql_evidence) if is_retry else [sql_evidence]
     return state
@@ -169,8 +284,35 @@ def semantic_node(state: MaintenanceState) -> MaintenanceState:
     is_retry = _is_evidence_retry(state, "semantic")
     state = _append_trace(state, _evidence_retry_label("semantic") if is_retry else "semantic")
 
-    retriever = _make_hybrid_retriever()
-    reranker = _make_reranker()
+    try:
+        retriever = _make_hybrid_retriever()
+        reranker = _make_reranker()
+    except Exception as exc:
+        # Container demos or locked-down environments may intentionally omit
+        # heavy retrieval dependencies or embedding credentials. The graph should
+        # degrade gracefully instead of turning a semantic/hybrid question into a
+        # 500 response. We still run a small SQLite lexical fallback so the
+        # semantic path can return cited evidence in local demos while the full
+        # dense+BM25 index is unavailable.
+        state["semantic_error"] = f"Semantic retrieval unavailable: {exc}"
+        top_k = 10 if is_retry else 5
+        fallback_results = _fallback_semantic_retrieval(state["question"], state.get("filters", {}), top_k=top_k)
+        if not fallback_results and state.get("filters"):
+            fallback_results = _fallback_semantic_retrieval(state["question"], {}, top_k=top_k)
+            state["loosened_filters_on_retry"] = True
+        state["candidates"] = fallback_results
+        state["results"] = fallback_results
+        state["evidence"] = _replace_evidence(
+            state,
+            "retrieval",
+            {"kind": "retrieval", "items": fallback_results, "fallback": "sqlite_lexical"},
+        )
+        fallback_citations = [
+            f"Record #{item.get('id', '?')}: {item.get('metadata', {}).get('production_line', '?')} / {item.get('metadata', {}).get('fault_category', '?')}"
+            for item in fallback_results[:5]
+        ]
+        state["citations"] = [item for item in state.get("citations", []) if not str(item).startswith("Record #")] + fallback_citations
+        return state
     filters = state.get("filters", {})
     # Widening makes evidence retries meaningfully different from the first pass:
     # we ask each retriever for a larger pool and rerank more final chunks. If
@@ -248,6 +390,10 @@ def _deterministic_evaluate_answer(state: MaintenanceState) -> dict[str, object]
         missing_aspects.append("evidence is available but citations are missing")
     if not evidence:
         missing_aspects.append("no evidence was available for verification")
+    aggregate_required = bool(state.get("aggregate_required")) or question_requires_aggregate(str(state.get("question", "")))
+    sql_query = str(state.get("sql_query", ""))
+    if aggregate_required and sql_query and not sql_uses_aggregate(sql_query):
+        missing_aspects.append("SQL query type does not match aggregation question")
     retry_target = "answer"
     retry_targets: list[str] = []
     if "no evidence was available for verification" in missing_aspects:
@@ -259,6 +405,8 @@ def _deterministic_evaluate_answer(state: MaintenanceState) -> dict[str, object]
         elif query_type == "hybrid":
             retry_target = "answer"
             retry_targets = ["analytical", "semantic"]
+    elif "SQL query type does not match aggregation question" in missing_aspects:
+        retry_target = "analytical"
 
     return {
         "is_sufficient": bool(answer) and not missing_aspects,
@@ -313,6 +461,7 @@ def evaluate_draft_answer(state: MaintenanceState) -> dict[str, object]:
                             "Does the draft answer actually address the user's question?",
                             "Is every substantive claim supported by SQL rows or retrieved chunks?",
                             "Does it cite the evidence it should cite?",
+                            "If the user asks for a count, average, top-N, distribution, or trend, does the SQL query use aggregate SQL such as COUNT, AVG, SUM, or GROUP BY instead of a plain SELECT ... LIMIT listing?",
                             "If the evidence itself is missing or insufficient, choose retry_target analytical or semantic.",
                             "If this is a hybrid question and both SQL and retrieval evidence need repair, use retry_targets.",
                             "If the evidence is enough but the answer failed to use it well, choose retry_target answer.",

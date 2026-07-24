@@ -10,9 +10,9 @@ RUN python -m venv /opt/venv
 ENV VIRTUAL_ENV=/opt/venv
 ENV PATH="/opt/venv/bin:$PATH"
 
-COPY requirements.txt ./
+COPY requirements-api.txt ./
 RUN pip install --no-cache-dir --upgrade pip \
-    && pip install --no-cache-dir -r requirements.txt
+    && pip install --no-cache-dir -r requirements-api.txt
 
 
 FROM python:3.11-slim AS runtime
@@ -35,7 +35,7 @@ COPY graph ./graph
 COPY ingestion ./ingestion
 COPY retrieval ./retrieval
 COPY data/generate_synthetic_data.py ./data/generate_synthetic_data.py
-COPY requirements.txt ./requirements.txt
+COPY requirements-api.txt ./requirements-api.txt
 
 RUN useradd --create-home --shell /bin/bash appuser \
     && mkdir -p /app/data /app/chroma_data \

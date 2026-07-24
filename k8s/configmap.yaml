@@ -1,0 +1,16 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: maintenance-copilot-config
+  namespace: maintenance-copilot
+  labels:
+    app.kubernetes.io/name: maintenance-copilot
+data:
+  MAINTENANCE_COPILOT_ALLOW_PUBLIC: "false"
+  MAINTENANCE_COPILOT_API_KEY_ROLES: "demo-user-key:viewer,demo-admin-key:admin"
+  MAINTENANCE_COPILOT_RATE_LIMIT_PER_MINUTE: "20"
+  MAINTENANCE_COPILOT_CORS_ORIGINS: "https://maintenance-copilot.example.com"
+  AZURE_OPENAI_ENDPOINT: "https://topuz-openai.openai.azure.com/openai/v1"
+  AZURE_OPENAI_DEPLOYMENT_NAME: "gpt-5.4-mini"
+  AZURE_OPENAI_API_VERSION: "2024-06-01"
+  AZURE_OPENAI_EMBEDDING_DEPLOYMENT_NAME: "text-embedding-3-small"

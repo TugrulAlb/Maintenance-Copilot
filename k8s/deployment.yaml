@@ -1,0 +1,69 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: maintenance-copilot-api
+  namespace: maintenance-copilot
+  labels:
+    app.kubernetes.io/name: maintenance-copilot
+    app.kubernetes.io/component: api
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: maintenance-copilot
+      app.kubernetes.io/component: api
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: maintenance-copilot
+        app.kubernetes.io/component: api
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        fsGroup: 1000
+      containers:
+        - name: api
+          image: maintenance-copilot:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8000
+          envFrom:
+            - configMapRef:
+                name: maintenance-copilot-config
+            - secretRef:
+                name: maintenance-copilot-secrets
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 3
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            timeoutSeconds: 5
+          resources:
+            requests:
+              cpu: 250m
+              memory: 512Mi
+            limits:
+              cpu: "1"
+              memory: 2Gi
+          volumeMounts:
+            - name: maintenance-data
+              mountPath: /app/data
+            - name: chroma-data
+              mountPath: /app/chroma_data
+      volumes:
+        - name: maintenance-data
+          persistentVolumeClaim:
+            claimName: maintenance-copilot-data
+        - name: chroma-data
+          persistentVolumeClaim:
+            claimName: maintenance-copilot-chroma

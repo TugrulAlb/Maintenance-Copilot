@@ -1,0 +1,27 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: maintenance-copilot-data
+  namespace: maintenance-copilot
+  labels:
+    app.kubernetes.io/name: maintenance-copilot
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 2Gi
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: maintenance-copilot-chroma
+  namespace: maintenance-copilot
+  labels:
+    app.kubernetes.io/name: maintenance-copilot
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 5Gi

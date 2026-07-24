@@ -24,13 +24,26 @@ def _deterministic_answer(state: dict[str, object]) -> tuple[str, list[str]]:
     if query_type in {"analytical", "hybrid"}:
         sql_rows = state.get("sql_rows", [])
         if sql_rows:
-            preview = sql_rows[:3]
-            parts = []
-            for row in preview:
-                parts.append(
-                    f"{row.get('production_line', '?')} / {row.get('fault_category', '?')} / {row.get('machine_id', '?')}"
-                )
-            answer = f"Analytical sonuç: {len(sql_rows)} kayıt bulundu. İlk örnekler: {', '.join(parts)}."
+            first_row = sql_rows[0]
+            if isinstance(first_row, dict) and "record_count" in first_row:
+                answer = f"Analytical sonuç: {first_row.get('record_count', 0)} kayıt bulundu."
+            else:
+                preview = sql_rows[:3]
+                parts = []
+                for row in preview:
+                    if "issue_count" in row:
+                        parts.append(
+                            f"{row.get('production_line', row.get('fault_category', '?'))}: {row.get('issue_count')} kayıt"
+                        )
+                    elif "avg_resolution_time" in row:
+                        parts.append(
+                            f"{row.get('production_line', '?')}: ortalama {row.get('avg_resolution_time')} dk"
+                        )
+                    else:
+                        parts.append(
+                            f"{row.get('production_line', '?')} / {row.get('fault_category', '?')} / {row.get('machine_id', '?')}"
+                        )
+                answer = f"Analytical sonuç: {', '.join(parts)}."
         else:
             answer = "Analytical sorgu çalıştı ancak sonuç döndürmedi."
         if query_type == "hybrid" and state.get("results"):

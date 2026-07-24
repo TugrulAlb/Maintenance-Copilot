@@ -54,7 +54,7 @@ def route_after_evaluation(state: MaintenanceState) -> str:
         return retry_target
 
     if retry_target == "answer" and int(state.get("retry_count", 0)) <= MAX_ANSWER_RETRIES:
-        return "answer"
+        return "generate_answer"
 
     return "compose"
 
@@ -66,7 +66,7 @@ def _build_graph():
     graph.add_node("analytical", analytical_node)
     graph.add_node("semantic", semantic_node)
     graph.add_node("hybrid", hybrid_node)
-    graph.add_node("answer", answer_node)
+    graph.add_node("generate_answer", answer_node)
     graph.add_node("evaluate_answer", evaluate_answer_node)
     graph.add_node("compose", compose_node)
 
@@ -81,14 +81,20 @@ def _build_graph():
         _route_node,
         {"analytical": "analytical", "semantic": "semantic", "hybrid": "hybrid"},
     )
-    graph.add_edge("analytical", "answer")
-    graph.add_edge("semantic", "answer")
-    graph.add_edge("hybrid", "answer")
-    graph.add_edge("answer", "evaluate_answer")
+    graph.add_edge("analytical", "generate_answer")
+    graph.add_edge("semantic", "generate_answer")
+    graph.add_edge("hybrid", "generate_answer")
+    graph.add_edge("generate_answer", "evaluate_answer")
     graph.add_conditional_edges(
         "evaluate_answer",
         route_after_evaluation,
-        {"answer": "answer", "analytical": "analytical", "semantic": "semantic", "hybrid": "hybrid", "compose": "compose"},
+        {
+            "generate_answer": "generate_answer",
+            "analytical": "analytical",
+            "semantic": "semantic",
+            "hybrid": "hybrid",
+            "compose": "compose",
+        },
     )
     graph.add_edge("compose", END)
     return graph.compile()

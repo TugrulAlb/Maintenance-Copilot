@@ -29,8 +29,11 @@ class MaintenanceState(TypedDict, total=False):
     conversation_history: list[dict[str, object]]
     sql_rows: list[dict[str, object]]
     sql_query: str
+    sql_generation_issue: bool
+    aggregate_required: bool
     evidence: list[dict[str, object]]
     candidates: list[dict[str, object]]
     results: list[dict[str, object]]
     citations: list[str]
     output_redactions: list[str]
+    semantic_error: str
